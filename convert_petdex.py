@@ -12,7 +12,7 @@ Petdex → Star-Office-UI 精灵转换器
   python3 convert_petdex.py boba --fw 128 --fh 176
 
 Petdex 宠物安装位置: ~/.petdex/pets/<slug>/
-Star-Office-UI 精灵目录: Star-Office-UI/frontend/static/
+Star-Office-UI 精灵目录: Star-Office-UI/frontend/
 
 转换后会生成:
   - petdex_<slug>.png          # 第一帧（立绘，用于 office 显示）
