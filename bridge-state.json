@@ -1,26 +1,26 @@
 {
   "Chief": {
     "state": "idle",
-    "detail": ""
+    "detail": "离线 30s"
   },
   "Git管家": {
     "state": "idle",
     "detail": ""
   },
   "Readme管家": {
-    "state": "executing",
+    "state": "idle",
     "detail": ""
   },
   "排版管家": {
     "state": "idle",
-    "detail": ""
+    "detail": "离线 30s"
   },
   "UB模式": {
     "state": "idle",
     "detail": ""
   },
   "Vue3专家": {
-    "state": "executing",
+    "state": "idle",
     "detail": ""
   },
   "Remotion大师": {
@@ -29,11 +29,11 @@
   },
   "管理顾问": {
     "state": "idle",
-    "detail": ""
+    "detail": "离线 30s"
   },
   "设计品味": {
-    "state": "executing",
-    "detail": ""
+    "state": "idle",
+    "detail": "离线 30s"
   },
   "AI工程师": {
     "state": "idle",
@@ -41,23 +41,23 @@
   },
   "知识管理者": {
     "state": "idle",
-    "detail": "离线 30s"
+    "detail": "离线 31s"
   },
   "软件工程师": {
-    "state": "executing",
-    "detail": ""
+    "state": "idle",
+    "detail": "离线 32s"
   },
   "技术负责人": {
     "state": "idle",
-    "detail": ""
+    "detail": "离线 30s"
   },
   "产品经理": {
     "state": "idle",
-    "detail": ""
+    "detail": "离线 30s"
   },
   "SRE工程师": {
     "state": "idle",
-    "detail": ""
+    "detail": "离线 30s"
   },
   "像素办公室": {
     "state": "idle",

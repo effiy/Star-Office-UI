@@ -203,6 +203,13 @@ let agents = {}; // agentId -> sprite/container
 let lastAgentsFetch = 0;
 const AGENTS_FETCH_INTERVAL = 2500;
 
+// ── Performance metrics ─────────────────────────────────
+let frameCount = 0;
+let lastFpsTime = 0;
+let currentFps = 0;
+let lastMetricsReport = 0;
+const METRICS_INTERVAL = 10000;  // report to server every 10s
+
 // 简单的字符串哈希，用于确定性分配
 function hashCode(str) {
   let hash = 0;
@@ -642,7 +649,35 @@ function create() {
   }
 }
 
+function reportMetrics() {
+  var memory = (typeof performance !== 'undefined' && performance.memory)
+    ? performance.memory : {};
+  fetch('/client-metrics', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      fps: currentFps,
+      usedJSHeapSize: memory.usedJSHeapSize || 0,
+      totalJSHeapSize: memory.totalJSHeapSize || 0,
+      jsHeapSizeLimit: memory.jsHeapSizeLimit || 0,
+    })
+  }).catch(function() {}); // fire-and-forget
+}
+
 function update(time) {
+  // FPS tracking
+  frameCount++;
+  if (time - lastFpsTime >= 1000) {
+    currentFps = Math.round(frameCount / ((time - lastFpsTime) / 1000));
+    frameCount = 0;
+    lastFpsTime = time;
+  }
+  // Report metrics to server periodically
+  if (time - lastMetricsReport > METRICS_INTERVAL) {
+    reportMetrics();
+    lastMetricsReport = time;
+  }
+
   if (time - lastFetch > FETCH_INTERVAL) { fetchStatus(); lastFetch = time; }
   if (time - lastAgentsFetch > AGENTS_FETCH_INTERVAL) { fetchAgents(); lastAgentsFetch = time; }
 

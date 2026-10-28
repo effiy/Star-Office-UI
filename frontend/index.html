@@ -3639,6 +3639,18 @@ function toggleBrokerPanel() {
                     }
 
                     guestSprites[id] = { sprite, nameText, detailBubble };
+
+                    // 点击 bot → 显示详情/委派
+                    sprite.on('pointerdown', () => {
+                        const msg = [
+                            `🤖 ${agent.name || '?'}`,
+                            `状态: ${stateLabel}`,
+                            agent.detail ? `任务: ${agent.detail}` : '',
+                            '',
+                            '💡 通过 DSH 发消息或委派任务给此 Bot'
+                        ].filter(Boolean).join('\n');
+                        alert(msg);
+                    });
                 } else {
                     const g = guestSprites[id];
                     const yOffset = (DEMO_MODE && (agent.agentId === 'demo_mercury' || agent.name === '水星')) ? 10 : 0;
@@ -3679,6 +3691,26 @@ function toggleBrokerPanel() {
                     }
 
                     g.nameText.setText(agent.name || '访客');
+
+                    // 更新活动气泡
+                    const newDetail = agent.detail || '';
+                    if (g.detailBubble) {
+                        g.detailBubble.destroy();
+                        g.detailBubble = null;
+                    }
+                    if (newDetail.length > 0) {
+                        const shortDetail = newDetail.length > 20 ? newDetail.slice(0, 18) + '…' : newDetail;
+                        const bubbleW = shortDetail.length * 8 + 20;
+                        const bubbleY = (p.y + yOffset) - (isDemo ? 50 : 80);
+                        const bubbleBg = game.add.rectangle(p.x, bubbleY, bubbleW, 20, 0x1a1a2e, 0.85).setOrigin(0.5);
+                        bubbleBg.setStrokeStyle(1, 0x7c3aed);
+                        const bubbleTxt = game.add.text(p.x, bubbleY, shortDetail, {
+                            fontFamily: 'ArkPixel, monospace', fontSize: '10px',
+                            fill: '#c4b89c', align: 'center'
+                        }).setOrigin(0.5);
+                        g.detailBubble = game.add.container(0, 0, [bubbleBg, bubbleTxt]);
+                        g.detailBubble.setDepth(2601);
+                    }
                 }
             });
 
@@ -3687,6 +3719,9 @@ function toggleBrokerPanel() {
                 if (!seenIds.has(id)) {
                     guestSprites[id].sprite.destroy();
                     guestSprites[id].nameText.destroy();
+                    if (guestSprites[id].detailBubble) {
+                        guestSprites[id].detailBubble.destroy();
+                    }
                     delete guestSprites[id];
                     if (guestBubbles[id]) {
                         guestBubbles[id].destroy();

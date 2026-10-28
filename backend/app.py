@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 from security_utils import is_production_mode, is_strong_secret, is_strong_drawer_pass
 from memo_utils import get_yesterday_date_str, sanitize_content, extract_memo_from_file
@@ -80,6 +81,17 @@ STATE_TO_AREA_MAP = {
     "error": "error",
 }
 
+
+START_TIME = time.time()  # server start epoch for uptime calculation
+
+# Client-reported frontend metrics (updated by Phaser game via POST /client-metrics)
+client_metrics: dict = {
+    "fps": 0,
+    "usedJSHeapSize": 0,
+    "totalJSHeapSize": 0,
+    "jsHeapSizeLimit": 0,
+    "last_report_at": 0,
+}
 
 app = Flask(__name__, static_folder=FRONTEND_DIR, static_url_path="/static")
 app.secret_key = os.getenv("FLASK_SECRET_KEY") or os.getenv("STAR_OFFICE_SECRET") or "star-office-dev-secret-change-me"
@@ -1276,12 +1288,63 @@ def set_agent_avatar():
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Health check"""
+    """Health check — returns uptime, bridge connectivity, and bot count."""
+    uptime = time.time() - START_TIME
+    # Check bridge health: bridge-state.json should be updated every 3s
+    bridge_ok = False
+    bridge_age = 0
+    bridge_file = os.path.join(ROOT_DIR, "bridge-state.json")
+    if os.path.exists(bridge_file):
+        try:
+            bridge_age = time.time() - os.path.getmtime(bridge_file)
+            bridge_ok = bridge_age < 30  # bridge pushes every 3s
+        except OSError:
+            pass
+
+    bot_count = 0
+    try:
+        agents = load_agents_state()
+        bot_count = len(agents)
+    except Exception:
+        pass
+
     return jsonify({
         "status": "ok",
         "service": "star-office-ui",
+        "uptime_seconds": round(uptime, 1),
+        "uptime_human": f"{int(uptime // 3600)}h {int((uptime % 3600) // 60)}m {int(uptime % 60)}s",
+        "bridge": {
+            "connected": bridge_ok,
+            "last_seen_sec": round(bridge_age, 1) if bridge_age else None,
+        },
+        "bot_count": bot_count,
+        "frontend": {
+            "fps": client_metrics.get("fps", 0),
+            "memory_mb": {
+                "used": round(client_metrics.get("usedJSHeapSize", 0) / 1048576, 1),
+                "total": round(client_metrics.get("totalJSHeapSize", 0) / 1048576, 1),
+                "limit": round(client_metrics.get("jsHeapSizeLimit", 0) / 1048576, 1),
+            },
+            "last_report_sec": round(time.time() - client_metrics.get("last_report_at", 0), 1) if client_metrics.get("last_report_at") else None,
+        },
         "timestamp": datetime.now().isoformat(),
     })
+
+
+@app.route("/client-metrics", methods=["POST"])
+def client_metrics_route():
+    """Receive FPS and memory metrics from the Phaser frontend."""
+    global client_metrics
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        client_metrics["fps"] = data.get("fps", 0)
+        client_metrics["usedJSHeapSize"] = data.get("usedJSHeapSize", 0)
+        client_metrics["totalJSHeapSize"] = data.get("totalJSHeapSize", 0)
+        client_metrics["jsHeapSizeLimit"] = data.get("jsHeapSizeLimit", 0)
+        client_metrics["last_report_at"] = time.time()
+    except Exception:
+        pass
+    return jsonify({"ok": True})
 
 
 @app.route("/ds-bot-states", methods=["GET"])
@@ -1299,33 +1362,87 @@ def ds_bot_states():
             except Exception:
                 pass
 
-        bots = []
+        bots = {}
+        now_iso = datetime.now().isoformat()
         for a in agents:
             name = a.get("name", "")
             state = a.get("state", "idle")
             detail = a.get("detail", "")
-            area = a.get("area", "")
-            avatar = a.get("avatar", "")
-            is_main = a.get("isMain", False)
+            updated = a.get("updated_at", now_iso)
             # bridge 数据优先（更实时）
             if name in bridge_states:
                 state = bridge_states[name].get("state", state)
                 detail = bridge_states[name].get("detail", detail)
 
-            bots.append({
-                "name": name,
+            bots[name] = {
                 "state": state,
                 "detail": detail,
-                "area": area,
-                "avatar": avatar,
-                "isMain": is_main,
-            })
+                "updatedAt": updated,
+            }
 
         return jsonify({
-            "ok": True,
-            "total": len(bots),
             "bots": bots,
-            "timestamp": datetime.now().isoformat(),
+            "count": len(bots),
+            "updated_at": now_iso,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@app.route("/office/floor/<int:n>", methods=["GET"])
+def office_floor(n):
+    """返回指定楼层的 bot 状态
+    
+    楼层分配:
+      1F: 管理决策层 — Chief, 管理顾问, 技术负责人, 产品经理, Readme管家
+      2F: 工程执行层 — 软件工程师, AI工程师, SRE工程师, Git管家, UB模式, Vue3专家
+      3F: 创意内容层 — Remotion大师, 排版管家, 设计品味, 知识管理者, 像素办公室
+    """
+    floor_map = {
+        1: ["Chief", "管理顾问", "技术负责人", "产品经理", "Readme管家"],
+        2: ["软件工程师", "AI工程师", "SRE工程师", "Git管家", "UB模式", "Vue3专家"],
+        3: ["Remotion大师", "排版管家", "设计品味", "知识管理者", "像素办公室"],
+    }
+    if n not in floor_map:
+        return jsonify({"ok": False, "msg": f"楼层 {n} 不存在 (1-3)"}), 404
+
+    floor_names = {1: "管理决策层", 2: "工程执行层", 3: "创意内容层"}
+    floor_bots = floor_map[n]
+    
+    try:
+        agents = load_agents_state()
+        # bridge 数据优先
+        bridge_states = {}
+        bridge_file = os.path.join(ROOT_DIR, "bridge-state.json")
+        if os.path.exists(bridge_file):
+            try:
+                with open(bridge_file, "r") as f:
+                    bridge_states = json.load(f)
+            except Exception:
+                pass
+
+        bots = {}
+        now_iso = datetime.now().isoformat()
+        for a in agents:
+            name = a.get("name", "")
+            if name not in floor_bots:
+                continue
+            state = a.get("state", "idle")
+            detail = a.get("detail", "")
+            updated = a.get("updated_at", now_iso)
+            if name in bridge_states:
+                state = bridge_states[name].get("state", state)
+                detail = bridge_states[name].get("detail", detail)
+            bots[name] = {"state": state, "detail": detail, "updatedAt": updated}
+
+        active = sum(1 for b in bots.values() if b["state"] != "idle")
+        return jsonify({
+            "floor": n,
+            "name": floor_names[n],
+            "bots": bots,
+            "count": len(bots),
+            "active": active,
+            "updated_at": now_iso,
         })
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)}), 500
