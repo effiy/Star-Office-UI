@@ -1220,6 +1220,9 @@ def agent_push():
         target["detail"] = detail
         if name:
             target["name"] = name
+        avatar = (data.get("avatar") or "").strip()
+        if avatar:
+            target["avatar"] = avatar
         target["updated_at"] = datetime.now().isoformat()
         target["area"] = state_to_area(state)
         target["source"] = "remote-openclaw"
@@ -1227,6 +1230,46 @@ def agent_push():
 
         save_agents_state(agents)
         return jsonify({"ok": True, "agentId": agent_id, "area": target.get("area")})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@app.route("/set-agent-avatar", methods=["POST"])
+def set_agent_avatar():
+    """Set a custom avatar sprite for an agent.
+    
+    Accepts:
+    - agentId (required): the agent's ID
+    - avatar (required): sprite key, e.g. "guest_role_3" or "petdex:boba"
+    """
+    try:
+        data = request.get_json()
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "msg": "invalid json"}), 400
+
+        agent_id = (data.get("agentId") or "").strip()
+        avatar = (data.get("avatar") or "").strip()
+
+        if not agent_id:
+            return jsonify({"ok": False, "msg": "缺少 agentId"}), 400
+        if not avatar:
+            return jsonify({"ok": False, "msg": "缺少 avatar"}), 400
+
+        agents = load_agents_state()
+        target = next((a for a in agents if a.get("agentId") == agent_id), None)
+        if not target:
+            return jsonify({"ok": False, "msg": "agent 未找到"}), 404
+
+        target["avatar"] = avatar
+        target["updated_at"] = datetime.now().isoformat()
+        save_agents_state(agents)
+
+        return jsonify({
+            "ok": True,
+            "agentId": agent_id,
+            "name": target.get("name", ""),
+            "avatar": avatar
+        })
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)}), 500
 
