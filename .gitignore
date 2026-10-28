@@ -11,6 +11,9 @@ venv/
 # OS/editor
 .DS_Store
 
+# Node
+node_modules/
+
 # Runtime state (local only)
 state.json
 agents-state.json

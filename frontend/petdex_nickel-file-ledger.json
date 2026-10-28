@@ -1,0 +1,10 @@
+{
+  "slug": "nickel-file-ledger",
+  "displayName": "Nickel File Ledger",
+  "spriteVersionNumber": 2,
+  "frameWidth": 128,
+  "frameHeight": 144,
+  "columns": 12,
+  "rows": 13,
+  "totalFrames": 156
+}

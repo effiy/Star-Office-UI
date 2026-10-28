@@ -4,41 +4,44 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Star 的像素办公室</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⭐</text></svg>">
     <style>
         @font-face {
             font-family: 'ArkPixel';
             src: url('/static/fonts/ark-pixel-12px-proportional-zh_cn.ttf.woff2') format('woff2');
             font-weight: normal;
             font-style: normal;
+            font-display: swap;
         }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            background: #1a1a2e;
+            background: #f5f0eb;
+            color: #3d3929;
             display: flex;
             flex-direction: column;
             justify-content: flex-start;
             align-items: center;
             min-height: 100vh;
             font-family: 'ArkPixel', 'Courier New', monospace;
-            padding: 20px 0;
-            gap: 10px;
-            overflow-x: hidden;
+            padding: 0;
+            gap: 0;
+            overflow: hidden;
         }
         /* 底部面板容器 */
         #main-stage {
             position: relative;
-            width: 1280px;
+            width: 100%;
             transition: transform .25s ease;
             will-change: transform;
         }
         body.drawer-open #main-stage {
-            /* 与右侧抽屉并列：按视口动态左移，确保与抽屉至少保留 20px 间隔 */
-            transform: translateX(calc(-1 * max(0px, (min(320px, 92vw) + 20px) - ((100vw - 1280px) / 2))));
+            width: calc(100vw - max(320px, 30vw) - 20px);
+            transform: none;
         }
         #bottom-panels {
             display: flex;
             gap: 20px;
-            width: 1280px;
+            width: 100%;
             max-width: none;
             justify-content: flex-start;
             margin-top: 20px;
@@ -47,8 +50,8 @@
             position: relative;
             border: 0;
             image-rendering: pixelated;
-            width: 1280px;
-            height: 720px;
+            width: 100%;
+            height: 100vh;
             max-width: none;
             max-height: none;
             aspect-ratio: auto;
@@ -61,7 +64,7 @@
             /* 再兜底一次：即使外层高度变化，也不要拉伸变形 */
             object-fit: contain;
             /* 边框改为直接贴合画布内部，避免“框比地图大” */
-            box-shadow: inset 0 0 0 4px #64477d;
+            box-shadow: inset 0 0 0 4px #d4c5b9;
             position: relative;
             z-index: 10;
         }
@@ -70,7 +73,7 @@
             position: absolute;
             inset: 0;
             z-index: 5;
-            background: radial-gradient(ellipse at center, #2a2a45 0%, #1a1a2e 65%, #151522 100%);
+            background: radial-gradient(ellipse at center, #faf7f2 0%, #f0ebe4 65%, #e8e2d9 100%);
             overflow: hidden;
         }
         #game-skeleton::before {
@@ -91,10 +94,10 @@
             left: 50%;
             top: 50%;
             transform: translate(-50%, -50%);
-            color: #cbd5e1;
+            color: #8b8680;
             font-size: 14px;
             letter-spacing: 1px;
-            text-shadow: 0 1px 0 rgba(0,0,0,.4);
+            text-shadow: none;
         }
         #loading-overlay {
             position: fixed;
@@ -102,7 +105,7 @@
             left: 0;
             width: 100%;
             height: 100%;
-            background: #1a1a2e;
+            background: #f5f0eb;
             display: flex;
             flex-direction: column;
             justify-content: center;
@@ -110,15 +113,15 @@
             z-index: 100000;
         }
         #loading-text {
-            color: #ffd700;
+            color: #5b8c5a;
             font-size: 18px;
             margin-bottom: 20px;
         }
         #loading-progress-container {
             width: 300px;
             height: 20px;
-            background: #333;
-            border: 2px solid #555;
+            background: #e8e2d9;
+            border: 2px solid #c5bfb6;
             border-radius: 4px;
         }
         #loading-progress-bar {
@@ -599,11 +602,6 @@
             pointer-events: auto;
             border-radius: 10px;
         }
-        #lang-toggle-group,
-        #lang-toggle-group button {
-            position: relative;
-            z-index: 1000002 !important;
-        }
         .room-loading-inner {
             display: flex;
             flex-direction: column;
@@ -1070,10 +1068,7 @@
             }
 
             #coords-toggle,
-            #pan-toggle,
-            #lang-btn-en,
-            #lang-btn-jp,
-            #lang-btn-cn {
+            #pan-toggle {
                 font-size: 12px !important;
                 padding: 6px 8px !important;
             }
@@ -1148,7 +1143,7 @@
     <!-- 底部面板容器 -->
     <div id="bottom-panels">
         <!-- Memo 面板 -->
-        <div id="memo-panel">
+        <div id="memo-panel" style="display:none">
             <div id="memo-title">昨 日 小 记</div>
             <div id="memo-date"></div>
             <div class="memo-decoration">─ ─ ─ ─ ─</div>
@@ -1159,7 +1154,7 @@
         </div>
         
         <!-- 状态控制栏 -->
-        <div id="control-bar">
+        <div id="control-bar" style="display:none">
             <div id="control-bar-title">Star 状态</div>
             <div id="control-buttons">
                 <button id="btn-state-idle" onclick="setState('idle','待命')">待命</button>
@@ -1171,7 +1166,7 @@
         </div>
 
         <!-- Guest Agent 名单面板（右下角） -->
-        <div id="guest-agent-panel">
+        <div id="guest-agent-panel" style="display:none">
             <div id="guest-agent-panel-title">访 客 列 表</div>
             <div id="guest-agent-list">
                 <div style="color:#9ca3af;font-size:12px;text-align:center;padding:20px 0;">正在加载访客...</div>
@@ -1275,22 +1270,19 @@
     <div id="coords-overlay" style="display:none; position:fixed; pointer-events:none; background:rgba(0,0,0,0.85); color:#fff; font-family:ArkPixel,monospace; font-size:14px; padding:8px 12px; border-radius:4px; z-index:99999;">
         <div id="coords-display">X: 0 | Y: 0</div>
     </div>
-    <button id="coords-toggle" style="position:fixed; top:calc(env(safe-area-inset-top, 0px) + 12px); right:12px; z-index:999999; padding:8px 10px; font-family:ArkPixel,monospace; font-size:13px; cursor:pointer; border:2px solid #333; border-radius:5px; background:#333; color:#fff;">
+    <button id="coords-toggle" style="display:none; position:fixed; top:calc(env(safe-area-inset-top, 0px) + 12px); right:12px; z-index:999999; padding:8px 10px; font-family:ArkPixel,monospace; font-size:13px; cursor:pointer; border:2px solid #333; border-radius:5px; background:#333; color:#fff;">
         显示坐标
     </button>
-    <button id="pan-toggle" style="position:fixed; top:calc(env(safe-area-inset-top, 0px) + 12px); left:12px; z-index:999999; padding:8px 10px; font-family:ArkPixel,monospace; font-size:13px; cursor:pointer; border:2px solid #333; border-radius:5px; background:#333; color:#fff;">
+    <button id="pan-toggle" style="display:none; position:fixed; top:calc(env(safe-area-inset-top, 0px) + 12px); left:12px; z-index:999999; padding:8px 10px; font-family:ArkPixel,monospace; font-size:13px; cursor:pointer; border:2px solid #333; border-radius:5px; background:#333; color:#fff;">
         移动视野
     </button>
-    <div id="lang-toggle-group" style="position:fixed; top:calc(env(safe-area-inset-top, 0px) + 52px); left:12px; z-index:1000002; display:flex; gap:2px; align-items:center;">
-        <button id="lang-btn-en" onclick="setUILanguage('en')" style="padding:8px 10px; font-family:ArkPixel,monospace; font-size:13px; cursor:pointer; border:2px solid #333; border-radius:5px; background:#333; color:#fff;">EN</button>
-        <button id="lang-btn-jp" onclick="setUILanguage('ja')" style="padding:8px 10px; font-family:ArkPixel,monospace; font-size:13px; cursor:pointer; border:2px solid #333; border-radius:5px; background:#333; color:#fff;">JP</button>
-        <button id="lang-btn-cn" onclick="setUILanguage('zh')" style="padding:8px 10px; font-family:ArkPixel,monospace; font-size:13px; cursor:pointer; border:2px solid #333; border-radius:5px; background:#333; color:#fff;">CN</button>
-    </div>
+    
 
     <script src="/static/vendor/phaser-3.80.1.min.js?v={{VERSION_TIMESTAMP}}"></script>
+    <script src="/static/palette.js?v={{VERSION_TIMESTAMP}}"></script>
     <script>
         // 简易中英文切换
-        let uiLang = localStorage.getItem('uiLang') || 'en';
+        let uiLang = localStorage.getItem('uiLang') || 'zh';
         const I18N = {
             zh: {
                 controlTitle: 'Star 状态',
@@ -1317,7 +1309,7 @@
                 assetHintNotInScene: '当前场景未检测到此对象，仍可替换文件（刷新后生效）',
                 assetHintDefault: '通用素材：建议保持原图尺寸、透明通道与视觉重心一致，避免错位或失真',
                 showCoords: '显示坐标', hideCoords: '隐藏坐标', moveView: '移动视野', lockView: '锁定视野',
-                memoTitle: '昨 日 小 记', guestTitle: '访 客 列 表', officeTitle: '海辛小龙虾的办公室',
+                memoTitle: '昨 日 小 记', guestTitle: '访 客 列 表', officeTitle: '像素办公室',
                 loadingOffice: '正在加载 Star 的像素办公室...'
             },
             en: {
@@ -1404,20 +1396,6 @@
             setText('btn-state-syncing', 'btnSync');
             setText('btn-state-error', 'btnError');
             setText('btn-open-drawer', 'btnDecor');
-            const langButtons = [
-                { id: 'lang-btn-en', lang: 'en' },
-                { id: 'lang-btn-jp', lang: 'ja' },
-                { id: 'lang-btn-cn', lang: 'zh' }
-            ];
-            langButtons.forEach(({ id, lang }) => {
-                const el = document.getElementById(id);
-                if (!el) return;
-                const active = (uiLang === lang);
-                el.style.background = active ? '#22c55e' : '#333';
-                el.style.borderColor = active ? '#22c55e' : '#333';
-                el.style.color = '#fff';
-            });
-
             const drawerTitle = document.querySelector('#asset-drawer-header span');
             if (drawerTitle) drawerTitle.textContent = t('drawerTitle');
             const drawerClose = document.getElementById('btn-close-drawer');
@@ -1475,28 +1453,7 @@
             renderBootLoadingText(Number(loadingProgressBar?.style?.width?.replace('%','') || 0));
         }
 
-        function setUILanguage(lang) {
-            if (!['zh', 'en', 'ja'].includes(lang)) return;
-            uiLang = lang;
-            localStorage.setItem('uiLang', uiLang);
-            applyLanguage();
-            updateSpeedModeUI();
-
-            // 语言切换后立即重绘资产侧栏，确保易懂名同步更新
-            renderAssetDrawerList();
-
-            // 语言切换后同步刷新已选资产的指导文案（上传区小字三语联动）
-            if (selectedAssetInfo && selectedAssetInfo.path) {
-                const inScene = !!mapAssetPathToSprite(selectedAssetInfo.path);
-                renderSelectedAssetGuidance(selectedAssetInfo.path, inScene);
-            }
-
-            // 语言切换时，当前正在显示的 loading 文案也实时切换
-            const overlay = document.getElementById('room-loading-overlay');
-            if (overlay && overlay.style.display === 'flex') {
-                showRoomLoadingOverlay();
-            }
-        }
+        
 
         // 检测浏览器是否支持 WebP
         let supportsWebP = false;
@@ -1529,6 +1486,8 @@
             type: Phaser.AUTO,
             width: 1280,
             height: 720,
+            transparent: false,
+            backgroundColor: '#f5f0eb',
             parent: 'game-container',
             pixelArt: true,
             // 桌面端保持 FIT；手机端用 RESIZE，并在相机里按高度做 fit（可横向 pan）
@@ -1538,6 +1497,7 @@
                 width: 1280,
                 height: 720
             },
+            backgroundColor: '#f5f0eb',
             physics: { default: 'arcade', arcade: { gravity: { y: 0 }, debug: false } },
             scene: { preload: preload, create: create, update: update }
         };
@@ -3489,37 +3449,44 @@ function toggleBrokerPanel() {
         }
 
         function getAreaPoint(area, idx) {
-            // 非 demo 访客：仍用固定点位，避免每次轮询都抖动。
+            // 6 区多层布局 — 不同状态在不同区域，一眼可辨
             const map = {
+                // 🛋 休息区（3 层 × 6 = 18 位）
                 breakroom: [
-                    { x: 511, y: 262 },
-                    { x: 841, y: 621 },
-                    { x: 690, y: 470 },
-                    { x: 600, y: 340 },
-                    { x: 770, y: 540 },
-                    { x: 550, y: 420 },
-                    { x: 720, y: 310 },
-                    { x: 650, y: 580 }
+                    // 前排（沙发前）
+                    { x: 511, y: 580 }, { x: 600, y: 560 }, { x: 690, y: 590 },
+                    { x: 770, y: 570 }, { x: 841, y: 600 }, { x: 550, y: 550 },
+                    // 中排
+                    { x: 580, y: 480 }, { x: 680, y: 460 }, { x: 750, y: 490 },
+                    { x: 500, y: 500 }, { x: 620, y: 440 }, { x: 820, y: 520 },
+                    // 后排
+                    { x: 530, y: 380 }, { x: 650, y: 360 }, { x: 720, y: 390 },
+                    { x: 480, y: 410 }, { x: 600, y: 310 }, { x: 780, y: 350 },
                 ],
+                // 💻 写作区（办公桌）
                 writing: [
-                    { x: 190, y: 526 },
-                    { x: 380, y: 683 },
-                    { x: 300, y: 610 },
-                    { x: 240, y: 570 },
-                    { x: 350, y: 640 },
-                    { x: 160, y: 600 },
-                    { x: 420, y: 560 },
-                    { x: 280, y: 660 }
+                    { x: 220, y: 560 }, { x: 310, y: 580 }, { x: 180, y: 620 },
+                    { x: 280, y: 530 }, { x: 350, y: 610 }, { x: 240, y: 650 },
                 ],
+                // 🔍 研究区（书架）
+                researching: [
+                    { x: 150, y: 420 }, { x: 240, y: 440 }, { x: 120, y: 480 },
+                    { x: 200, y: 390 }, { x: 280, y: 460 }, { x: 160, y: 510 },
+                ],
+                // 🔧 执行区（工具台）
+                executing: [
+                    { x: 280, y: 280 }, { x: 360, y: 300 }, { x: 220, y: 340 },
+                    { x: 320, y: 250 }, { x: 400, y: 320 }, { x: 260, y: 370 },
+                ],
+                // 🔄 同步区（通信节点）
+                syncing: [
+                    { x: 140, y: 180 }, { x: 220, y: 200 }, { x: 100, y: 240 },
+                    { x: 180, y: 160 }, { x: 260, y: 220 },
+                ],
+                // 🐛 Bug 区（右下角）
                 error: [
-                    { x: 932, y: 275 },
-                    { x: 1109, y: 327 },
-                    { x: 1020, y: 305 },
-                    { x: 960, y: 340 },
-                    { x: 1070, y: 280 },
-                    { x: 990, y: 260 },
-                    { x: 1050, y: 350 },
-                    { x: 940, y: 310 }
+                    { x: 1000, y: 280 }, { x: 1100, y: 310 }, { x: 1050, y: 340 },
+                    { x: 960, y: 320 },  { x: 1120, y: 270 }, { x: 1020, y: 380 },
                 ]
             };
             const arr = map[area] || map.breakroom;
@@ -3537,7 +3504,7 @@ function toggleBrokerPanel() {
                 seenIds.add(id);
 
                 const isDemo = !!agent.isDemo || (DEMO_MODE && (id === 'demo_nika' || id === 'demo_mercury' || agent.name === '尼卡' || agent.name === '水星'));
-                const area = agent.area || (agent.state === 'error' ? 'error' : (agent.state === 'idle' ? 'breakroom' : 'writing'));
+                const area = agent.area || STATE_TO_AREA_MAP[agent.state] || 'breakroom';
 
                 const idx = area === 'breakroom' ? idxBreak++ : area === 'error' ? idxError++ : idxWrite++;
                 const p = isDemo
@@ -3557,41 +3524,84 @@ function toggleBrokerPanel() {
                         sprite = game.add.sprite(p.x, p.y, animKey, f).setOrigin(0.5, 1).setScale(1.1);
                         if (sprite.anims && sprite.anims.play) sprite.anims.play(animKey, true);
                     } else {
-                        // 非 demo 访客：优先用动画精灵（guest_anim_x），其次静态图，兜底星星
-                        // 先确定角色索引（1-6）
-                        let animIdx = agent.avatar
-                            ? parseInt((agent.avatar.match(/_(\d+)$/) || [])[1] || '0', 10)
-                            : 0;
-                        if (!animIdx || animIdx < 1 || animIdx > 6) {
-                            const aid = String(agent.agentId || '');
-                            let hash = 0;
-                            for (let i = 0; i < aid.length; i++) hash = (hash * 31 + aid.charCodeAt(i)) >>> 0;
-                            animIdx = (hash % 6) + 1;
-                        }
-                        const animKey = `guest_anim_${animIdx}`;
-                        const animIdleKey = `guest_anim_${animIdx}_idle`;
-
-                        if (game.textures.exists(animKey) && game.anims.exists(animIdleKey)) {
-                            sprite = game.add.sprite(p.x, p.y, animKey).setOrigin(0.5, 1).setScale(4.0);
-                            sprite.anims.play(animIdleKey, true);
+                        // 非 demo 访客：petdex 自定义 > 动画精灵 > 静态图 > 兜底星星
+                        // 优先检查是否为 petdex 自定义纹理
+                        const customKey = agent.avatar
+                            && agent.avatar.startsWith('petdex_')
+                            && game.textures.exists(agent.avatar)
+                            ? agent.avatar : null;
+                        
+                        if (customKey) {
+                            sprite = game.add.image(p.x, p.y, customKey).setOrigin(0.5, 1).setScale(1.0);
                         } else {
-                            const staticAvatarKey = agent.avatar && game.textures.exists(agent.avatar)
-                                ? agent.avatar
-                                : (() => {
+                            // guest_anim 动画精灵
+                            let animIdx = agent.avatar
+                                ? parseInt((agent.avatar.match(/_(\d+)$/) || [])[1] || '0', 10)
+                                : 0;
+                            if (!animIdx || animIdx < 1 || animIdx > 6) {
+                                const aid = String(agent.agentId || '');
+                                let hash = 0;
+                                for (let i = 0; i < aid.length; i++) hash = (hash * 31 + aid.charCodeAt(i)) >>> 0;
+                                animIdx = (hash % 6) + 1;
+                            }
+                            const animKey = `guest_anim_${animIdx}`;
+                            const animIdleKey = `guest_anim_${animIdx}_idle`;
+
+                            if (game.textures.exists(animKey) && game.anims.exists(animIdleKey)) {
+                                sprite = game.add.sprite(p.x, p.y, animKey).setOrigin(0.5, 1).setScale(4.0);
+                                sprite.anims.play(animIdleKey, true);
+                            } else {
+                                const staticAvatarKey = (() => {
                                     const aid = String(agent.agentId || '');
                                     let hash = 0;
                                     for (let i = 0; i < aid.length; i++) hash = (hash * 31 + aid.charCodeAt(i)) >>> 0;
                                     return GUEST_AVATARS[hash % GUEST_AVATARS.length];
                                 })();
 
-                            if (staticAvatarKey && game.textures.exists(staticAvatarKey)) {
-                                sprite = game.add.image(p.x, p.y, staticAvatarKey).setOrigin(0.5, 1).setScale(1.15);
-                            } else {
-                                sprite = game.add.text(p.x, p.y, '⭐', { fontFamily: 'ArkPixel, monospace', fontSize: '30px' }).setOrigin(0.5, 1);
+                                if (staticAvatarKey && game.textures.exists(staticAvatarKey)) {
+                                    sprite = game.add.image(p.x, p.y, staticAvatarKey).setOrigin(0.5, 1).setScale(1.15);
+                                } else {
+                                    sprite = game.add.text(p.x, p.y, '⭐', { fontFamily: 'ArkPixel, monospace', fontSize: '30px' }).setOrigin(0.5, 1);
+                                }
                             }
                         }
                     }
                     sprite.setDepth(2600);
+                    sprite.setInteractive({ useHandCursor: true });
+
+                    // hover 详情卡
+                    let hoverCard = null;
+                    sprite.on('pointerover', () => {
+                        if (hoverCard) return;
+                        const role = (typeof ROLE_COLOR_MAP !== 'undefined' && ROLE_COLOR_MAP[agent.name]) ? agent.name : '';
+                        const stateLabel = (typeof AREA_LABELS !== 'undefined' && AREA_LABELS[agent.state]) ? AREA_LABELS[agent.state] : agent.state;
+                        const lines = [
+                            agent.name || '?',
+                            stateLabel,
+                            agent.detail || ''
+                        ].filter(Boolean);
+                        const maxLen = Math.max(...lines.map(l => l.length));
+                        const cardW = maxLen * 9 + 24;
+                        const cardH = lines.length * 18 + 16;
+                        const cardBg = game.add.rectangle(p.x, p.y - 140, cardW, cardH, 0x1a1a2e, 0.9).setOrigin(0.5, 1);
+                        cardBg.setStrokeStyle(2, 0x7c3aed);
+                        const cardTexts = lines.map((line, i) => {
+                            const roleColor = (typeof ROLE_COLOR_MAP !== 'undefined' && ROLE_COLOR_MAP[agent.name]) || '#fafafa';
+                            return game.add.text(p.x, p.y - 140 + 10 + i * 18, line, {
+                                fontFamily: 'ArkPixel, monospace',
+                                fontSize: '12px',
+                                fill: i === 0 ? roleColor : '#fafafa',
+                                align: 'center'
+                            }).setOrigin(0.5, 1);
+                        });
+                        hoverCard = game.add.container(0, 0, [cardBg, ...cardTexts]);
+                        hoverCard.setDepth(9999);
+                        guestSprites[id].hoverCard = hoverCard;
+                    });
+                    sprite.on('pointerout', () => {
+                        if (hoverCard) { hoverCard.destroy(); hoverCard = null; }
+                        if (guestSprites[id]) guestSprites[id].hoverCard = null;
+                    });
                     if (DEMO_MODE && (agent.agentId === 'demo_mercury' || agent.name === '水星')) {
                         sprite.y = sprite.y + 10;
                     }
@@ -3603,7 +3613,7 @@ function toggleBrokerPanel() {
                     const nameText = game.add.text(p.x, nameTextY, agent.name || '访客', {
                         fontFamily: 'ArkPixel, monospace',
                         fontSize: isDemo ? '16px' : '15px',
-                        fill: '#ffffff',
+                        fill: (typeof ROLE_COLOR_MAP !== 'undefined' && ROLE_COLOR_MAP[agent.name]) || '#ffffff',
                         stroke: '#000',
                         strokeThickness: 3
                     }).setOrigin(0.5);
@@ -3977,7 +3987,7 @@ function toggleBrokerPanel() {
             // cache-busting to avoid stale background on client/CDN
             // use smaller/new map version provided by user
             this.load.image('office_bg', '/static/office_bg_small.webp?v={{VERSION_TIMESTAMP}}');
-            this.load.spritesheet('star_idle', '/static/star-idle-v5.png?v={{VERSION_TIMESTAMP}}', { frameWidth: 256, frameHeight: 256 });
+            this.load.spritesheet('star_idle', '/static/star-idle-boba.png?v={{VERSION_TIMESTAMP}}', { frameWidth: 256, frameHeight: 256 });
 
             // Furniture
             this.load.image('sofa_idle', '/static/sofa-idle-v3.png?v={{VERSION_TIMESTAMP}}');
@@ -4023,6 +4033,17 @@ function toggleBrokerPanel() {
             this.load.spritesheet('guest_anim_4', '/static/guest_anim_4.webp?v={{VERSION_TIMESTAMP}}', { frameWidth: 32, frameHeight: 32 });
             this.load.spritesheet('guest_anim_5', '/static/guest_anim_5.webp?v={{VERSION_TIMESTAMP}}', { frameWidth: 32, frameHeight: 32 });
             this.load.spritesheet('guest_anim_6', '/static/guest_anim_6.webp?v={{VERSION_TIMESTAMP}}', { frameWidth: 32, frameHeight: 32 });
+
+            // Guest role 静态立绘（128×64 PNG，用于非动画访客）
+            for (let i = 1; i <= 6; i++) {
+                this.load.image('guest_role_' + i, '/static/guest_role_' + i + '.png');
+            }
+
+            // Petdex 自定义精灵（从 Petdex 宠物转换的静态立绘）
+            const petdexPets = ['boba', 'eve', 'mallow', 'nickel-file-ledger', 'noir-webling'];
+            for (let pet of petdexPets) {
+                this.load.image('petdex_' + pet, '/static/petdex_' + pet + '.png');
+            }
         }
 
         function create() {
@@ -4083,12 +4104,12 @@ function toggleBrokerPanel() {
             // 加像素风小牌匾：海辛小龙虾的办公室
             const plaqueX = config.width / 2;
             const plaqueY = config.height - 36;
-            const plaqueBg = game.add.rectangle(plaqueX, plaqueY, 420, 44, 0x5d4037);
-            plaqueBg.setStrokeStyle(3, 0x3e2723);
+            const plaqueBg = game.add.rectangle(plaqueX, plaqueY, 420, 44, 0xc4b89c);
+            plaqueBg.setStrokeStyle(2, 0xa89880);
             const plaqueText = game.add.text(plaqueX, plaqueY, t('officeTitle'), {
                 fontFamily: 'ArkPixel, monospace',
                 fontSize: '18px',
-                fill: '#ffd700',
+                fill: '#5b8c5a',
                 fontWeight: '900',
                 fontStyle: 'bold',
                 stroke: '#000',
@@ -4114,63 +4135,51 @@ function toggleBrokerPanel() {
             plant.on('pointerdown', () => {
                 const next = Math.floor(Math.random() * window.plantFrameCount);
                 window.plantSprite.setFrame(next);
-            });
+            }); // MUJI cleanup:
 
             // Random plant at (230,185) (frame 0-15, 160x160 each)
-            const plant2Frame = Math.floor(Math.random() * plantFrameCount);
-            const plant2 = game.add.sprite(230, 185, 'plants', plant2Frame).setOrigin(0.5);
-            plant2.setDepth(5);
-            plant2.setInteractive({ useHandCursor: true });
-            // Expose to global for click handler
-            window.plantSprite2 = plant2;
-            
-            plant2.on('pointerdown', () => {
-                const next = Math.floor(Math.random() * window.plantFrameCount);
-                window.plantSprite2.setFrame(next);
-            });
+            // const plant2Frame = Math.floor(Math.random() * plantFrameCount);
+            // const plant2 = game.add.sprite(230, 185, 'plants', plant2Frame).setOrigin(0.5);
+            // plant2.setDepth(5);
+            // plant2.setInteractive({ useHandCursor: true });
+            // // Expose to global for click handler
+            // window.plantSprite2 = plant2;
+            //
+            // plant2.on('pointerdown', () => {
+            //     const next = Math.floor(Math.random() * window.plantFrameCount);
+            //     window.plantSprite2.setFrame(next);
+            // }); // MUJI cleanup:
 
             // Random plant at (977,496) (frame 0-15, 160x160 each)
-            const plant3Frame = Math.floor(Math.random() * plantFrameCount);
-            const plant3 = game.add.sprite(977, 496, 'plants', plant3Frame).setOrigin(0.5);
-            plant3.setDepth(5);
-            plant3.setInteractive({ useHandCursor: true });
-            // Expose to global for click handler
-            window.plantSprite3 = plant3;
-            
-            plant3.on('pointerdown', () => {
-                const next = Math.floor(Math.random() * window.plantFrameCount);
-                window.plantSprite3.setFrame(next);
-            });
+            // const plant3Frame = Math.floor(Math.random() * plantFrameCount);
+            // const plant3 = game.add.sprite(977, 496, 'plants', plant3Frame).setOrigin(0.5);
+            // plant3.setDepth(5);
+            // plant3.setInteractive({ useHandCursor: true });
+            // // Expose to global for click handler
+            // window.plantSprite3 = plant3;
+            //
+            // plant3.on('pointerdown', () => {
+            //     const next = Math.floor(Math.random() * window.plantFrameCount);
+            //     window.plantSprite3.setFrame(next);
+            // }); // MUJI cleanup:
 
             // Random poster at (252,66) (random frame from spritesheet)
-            const postersFrameCount = (this.textures.get('posters')?.frameTotal || 1) - 1;
-            const randomPosterFrame = Math.floor(Math.random() * Math.max(1, postersFrameCount));
-            const poster = game.add.sprite(252, 66, 'posters', randomPosterFrame).setOrigin(0.5);
-            poster.setDepth(4);
-            poster.setInteractive({ useHandCursor: true });
-            // Expose to global for click handler
-            window.posterSprite = poster;
-            window.posterFrameCount = postersFrameCount;
-            
-            poster.on('pointerdown', () => {
-                const next = Math.floor(Math.random() * window.posterFrameCount);
-                window.posterSprite.setFrame(next);
-            });
+            // const postersFrameCount = (this.textures.get('posters')?.frameTotal || 1) - 1;
+            // const randomPosterFrame = Math.floor(Math.random() * Math.max(1, postersFrameCount));
+            // const poster = game.add.sprite(252, 66, 'posters', randomPosterFrame).setOrigin(0.5);
+            // poster.setDepth(4);
+            // poster.setInteractive({ useHandCursor: true });
+            // // Expose to global for click handler
+            // window.posterSprite = poster;
+            // window.posterFrameCount = postersFrameCount;
+            //
+            // poster.on('pointerdown', () => {
+            //     const next = Math.floor(Math.random() * window.posterFrameCount);
+            //     window.posterSprite.setFrame(next);
+            // }); // MUJI cleanup: 
 
-            // Random cat at (94,557)
-            const catsFrameCount = (this.textures.get('cats')?.frameTotal || 1) - 1;
-            const randomCatFrame = Math.floor(Math.random() * Math.max(1, catsFrameCount));
-            const cat = game.add.sprite(94, 557, 'cats', randomCatFrame).setOrigin(0.5);
-            cat.setDepth(2000); // top layer
-            cat.setInteractive({ useHandCursor: true });
-            // Expose to global for click handler
-            window.catSprite = cat;
-            window.catsFrameCount = catsFrameCount;
-            cat.on('pointerdown', () => {
-                const next = Math.floor(Math.random() * window.catsFrameCount);
-                window.catSprite.setFrame(next);
-            });
-
+            // MUJI cleanup: cat removed
+            // MUJI cleanup: 
             // Coffee machine at (659,397) - animated sprite + shadow
             const coffeeMachineShadow = this.add.image(659, 397, 'coffee_machine_shadow').setOrigin(0.5);
             coffeeMachineShadow.setDepth(98);
@@ -4183,10 +4192,10 @@ function toggleBrokerPanel() {
                 frames: this.anims.generateFrameNumbers('coffee_machine', { start: 0, end: coffeeFrameMax }),
                 frameRate: 12.5,
                 repeat: -1
-            });
+            }); // MUJI cleanup:
             const coffeeMachine = this.add.sprite(659, 397, 'coffee_machine').setOrigin(0.5);
             coffeeMachine.setDepth(99);
-            coffeeMachine.anims.play('coffee_machine', true);
+            coffeeMachine.anims.play('coffee_machine', true); // MUJI cleanup: 
 
             // Server room animation
             const serverFrameMax = Math.max(0, (this.textures.get('serverroom')?.frameTotal || 1) - 2);
@@ -4200,7 +4209,7 @@ function toggleBrokerPanel() {
             serverroom.setDepth(2);
             // 默认 idle: 静止第0帧
             serverroom.anims.stop();
-            serverroom.setFrame(0);
+            serverroom.setFrame(0); // MUJI cleanup:
 
             // Desk at (218,417) (v2)
             const desk = this.add.image(218, 417, 'desk_v2').setOrigin(0.5);
@@ -4473,6 +4482,19 @@ function toggleBrokerPanel() {
                 coordsOverlay.style.top = (pointer.y + 18) + 'px';
             });
 
+            // 区域地面色（Phase 3: 半透明 tint 标记各工作区）
+            const areaTints = [
+                { x: 210, y: 580, w: 260, h: 100, color: 0xe8f0fe },   // writing
+                { x: 180, y: 400, w: 200, h: 130, color: 0xf3e8ff },   // researching
+                { x: 260, y: 260, w: 200, h: 130, color: 0xe6f7e6 },   // executing
+                { x: 150, y: 160, w: 180, h: 80,  color: 0xfef3c7 },   // syncing
+                { x: 970, y: 270, w: 200, h: 130, color: 0xfce8e6 },   // error
+            ];
+            areaTints.forEach(t => {
+                game.add.rectangle(t.x, t.y, t.w, t.h, t.color, 0.15)
+                    .setOrigin(0, 0).setDepth(10).setStrokeStyle(1, t.color, 0.3);
+            });
+
             // 加载昨日 memo
             loadMemo();
 
@@ -4678,12 +4700,13 @@ function toggleBrokerPanel() {
                         // If we're mid-transition, don't restart the path every poll
                         const changed = (pendingDesiredState === null) && (nextState !== currentState);
                         const nextLine = '[' + stateInfo.name + '] ' + (data.detail || '...');
-                        // 不论 changed 与否，都按服务端最新状态强制一次视觉同步，避免动画卡旧状态
-                        pendingDesiredState = null;
+                        // Only sync visual when state actually changes —
+                        // calling applyVisualState every poll restarts the
+                        // idle animation from frame 0, causing visible flicker.
                         if (currentState !== nextState) {
                             currentState = nextState;
+                            applyVisualState(nextState);
                         }
-                        applyVisualState(nextState);
 
                         if (changed) {
                             typewriterTarget = nextLine;
@@ -4857,9 +4880,9 @@ function toggleBrokerPanel() {
             // 只做手机端稍微调大一点，避免发糊
             const isTouch = IS_TOUCH_DEVICE;
             const fontSize = isTouch ? 14 : 12;
-            const bg = game.add.rectangle(anchorX, bubbleY, text.length * 10 + 20, 28, 0xffffff, 0.95);
-            bg.setStrokeStyle(2, 0x000000);
-            const txt = game.add.text(anchorX, bubbleY, text, { fontFamily: 'ArkPixel, monospace', fontSize: fontSize + 'px', fill: '#000', align: 'center' }).setOrigin(0.5);
+            const bg = game.add.rectangle(anchorX, bubbleY, text.length * 10 + 20, 28, 0x1a1a2e, 0.92);
+            bg.setStrokeStyle(2, 0x7c3aed);
+            const txt = game.add.text(anchorX, bubbleY, text, { fontFamily: 'ArkPixel, monospace', fontSize: fontSize + 'px', fill: '#fafafa', align: 'center' }).setOrigin(0.5);
             bubble = game.add.container(0, 0, [bg, txt]);
             bubble.setDepth(1200); // always above desk/star
             setTimeout(() => { if (bubble) { bubble.destroy(); bubble = null; } }, 3000);

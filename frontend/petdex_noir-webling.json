@@ -1,0 +1,10 @@
+{
+  "slug": "noir-webling",
+  "displayName": "Noir Webling",
+  "spriteVersionNumber": 2,
+  "frameWidth": 128,
+  "frameHeight": 144,
+  "columns": 12,
+  "rows": 13,
+  "totalFrames": 156
+}

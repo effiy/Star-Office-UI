@@ -203,6 +203,16 @@ let agents = {}; // agentId -> sprite/container
 let lastAgentsFetch = 0;
 const AGENTS_FETCH_INTERVAL = 2500;
 
+// 简单的字符串哈希，用于确定性分配
+function hashCode(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) - hash) + str.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
 // agent 颜色配置
 const AGENT_COLORS = {
   star: 0xffd700,
@@ -304,6 +314,8 @@ function preload() {
 
   this.load.image('sofa_idle', '/static/sofa-idle' + getExt('sofa-idle.png'));
   this.load.spritesheet('sofa_busy', '/static/sofa-busy-spritesheet' + getExt('sofa-busy-spritesheet.png'), { frameWidth: 256, frameHeight: 256 });
+  // sofa_idle image as static fallback (single frame)
+  this.load.image('sofa_busy_static', '/static/sofa-idle' + getExt('sofa-idle.png'));
 
   this.load.spritesheet('plants', '/static/plants-spritesheet' + getExt('plants-spritesheet.png'), { frameWidth: 160, frameHeight: 160 });
   this.load.spritesheet('posters', '/static/posters-spritesheet' + getExt('posters-spritesheet.png'), { frameWidth: 160, frameHeight: 160 });
@@ -315,11 +327,23 @@ function preload() {
   this.load.image('desk', '/static/desk' + getExt('desk.png'));
   this.load.spritesheet('star_working', '/static/star-working-spritesheet-grid' + (supportsWebP ? '.webp' : '.png'), { frameWidth: 230, frameHeight: 144 });
   this.load.spritesheet('sync_anim', '/static/sync-animation-spritesheet-grid' + (supportsWebP ? '.webp' : '.png'), { frameWidth: 256, frameHeight: 256 });
+  // sync-animation-v3-grid.webp: 1792x1792, 7x7=49 frames
   this.load.image('memo_bg', '/static/memo-bg' + (supportsWebP ? '.webp' : '.png'));
 
   // 新办公桌：强制 PNG（透明）
   this.load.image('desk_v2', '/static/desk-v2.png');
-  this.load.spritesheet('flowers', '/static/flowers-spritesheet' + (supportsWebP ? '.webp' : '.png'), { frameWidth: 65, frameHeight: 65 });
+  this.load.spritesheet('flowers', '/static/flowers-spritesheet' + (supportsWebP ? '.webp' : '.png'), { frameWidth: 128, frameHeight: 128 });
+
+  // 加载 Guest Role 像素精灵（用于 Agent 角色渲染）
+  for (let i = 1; i <= 6; i++) {
+    this.load.image('guest_role_' + i, '/static/guest_role_' + i + '.png');
+  }
+
+  // 加载 Petdex 自定义精灵
+  const petdexPets = ['boba', 'eve', 'mallow', 'nickel-file-ledger', 'noir-webling'];
+  for (let pet of petdexPets) {
+    this.load.image('petdex_' + pet, '/static/petdex_' + pet + '.png');
+  }
 }
 
 function create() {
@@ -336,7 +360,7 @@ function create() {
 
   this.anims.create({
     key: 'sofa_busy',
-    frames: this.anims.generateFrameNumbers('sofa_busy', { start: 0, end: 47 }),
+    frames: this.anims.generateFrameNumbers('sofa_busy', { start: 0, end: 0 }),
     frameRate: 12,
     repeat: -1
   });
@@ -527,7 +551,7 @@ function create() {
   // === 同步动画（来自 LAYOUT）===
   this.anims.create({
     key: 'sync_anim',
-    frames: this.anims.generateFrameNumbers('sync_anim', { start: 1, end: 52 }),
+    frames: this.anims.generateFrameNumbers('sync_anim', { start: 1, end: 48 }),
     frameRate: 12,
     repeat: -1
   });
@@ -974,15 +998,22 @@ function renderAgent(agent) {
     const container = game.add.container(baseX, baseY);
     container.setDepth(1200 + (isMain ? 100 : 0)); // 放到最顶层！
 
-    // 像素小人：用星星图标，更明显
-    const starIcon = game.add.text(0, 0, '⭐', {
-      fontFamily: 'ArkPixel, monospace',
-      fontSize: '32px'
-    }).setOrigin(0.5);
-    starIcon.name = 'starIcon';
+    // 像素人物：用精灵（根据 avatar 字段选择）
+    const avatarKey = agent.avatar || ('guest_role_' + (1 + Math.abs(hashCode(agentId) % 6)));
+    let body;
+    if (game.textures.exists(avatarKey)) {
+      body = game.add.sprite(0, 0, avatarKey).setOrigin(0.5, 1);
+    } else {
+      // 兜底：文字 emoji
+      body = game.add.text(0, 0, '⭐', {
+        fontFamily: 'ArkPixel, monospace',
+        fontSize: '32px'
+      }).setOrigin(0.5);
+    }
+    body.name = 'body';
 
-    // 名字标签（漂浮）
-    const nameTag = game.add.text(0, -36, name, {
+    // 名字标签（漂浮，精灵上方）
+    const nameTag = game.add.text(0, -72, name, {
       fontFamily: 'ArkPixel, monospace',
       fontSize: '14px',
       fill: '#' + nameColor.toString(16).padStart(6, '0'),
@@ -998,11 +1029,11 @@ function renderAgent(agent) {
     if (authStatus === 'pending') dotColor = 0xf59e0b;
     if (authStatus === 'rejected') dotColor = 0xef4444;
     if (authStatus === 'offline') dotColor = 0x94a3b8;
-    const statusDot = game.add.circle(20, -20, 5, dotColor, alpha);
+    const statusDot = game.add.circle(70, -64, 5, dotColor, alpha);
     statusDot.setStrokeStyle(2, 0x000000, alpha);
     statusDot.name = 'statusDot';
 
-    container.add([starIcon, statusDot, nameTag]);
+    container.add([body, statusDot, nameTag]);
     agents[agentId] = container;
   } else {
     // 更新 agent
