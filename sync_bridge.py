@@ -24,6 +24,7 @@ import requests
 BIND_HOST, BIND_PORT = "127.0.0.1", 19001
 STAR_OFFICE_URL = "http://127.0.0.1:19000"
 JOIN_KEY = "ocj_example_team_01"
+BRIDGE_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge-state.json")
 PID_FILE = "/tmp/chief-sync-bridge.pid"
 LOG_FILE = "/tmp/chief-sync-bridge.log"
 OFFLINE_TIMEOUT = 30
@@ -103,12 +104,29 @@ def push_agent_state(name: str, state: str, detail: str = "", source: str = "unk
             emoji = {"idle":"🛋","writing":"💻","executing":"🔧","error":"🐛"}.get(state,"❓")
             log.info("%s %-12s → %-10s (via %s)", emoji, name, state, source)
             entry["lastState"] = state
+            entry["lastDetail"] = detail or ""
             if source == "callback":
                 entry["lastCallback"] = time.time()
+            save_bridge_state()
             return True
     except Exception as e:
         log.error("%s 推送失败: %s", name, e)
     return False
+
+
+def save_bridge_state():
+    """保存当前所有 bot 状态到共享文件，供 Flask /ds-bot-states 读取"""
+    try:
+        snapshot = {}
+        for name, entry in bot_registry.items():
+            snapshot[name] = {
+                "state": entry.get("lastState", "idle"),
+                "detail": entry.get("lastDetail", ""),
+            }
+        with open(BRIDGE_STATE_FILE, "w") as f:
+            json.dump(snapshot, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.error("保存 bridge-state.json 失败: %s", e)
 
 
 def check_offline_all():

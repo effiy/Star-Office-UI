@@ -1,0 +1,66 @@
+{
+  "Chief": {
+    "state": "idle",
+    "detail": ""
+  },
+  "Git管家": {
+    "state": "idle",
+    "detail": ""
+  },
+  "Readme管家": {
+    "state": "executing",
+    "detail": ""
+  },
+  "排版管家": {
+    "state": "idle",
+    "detail": ""
+  },
+  "UB模式": {
+    "state": "idle",
+    "detail": ""
+  },
+  "Vue3专家": {
+    "state": "executing",
+    "detail": ""
+  },
+  "Remotion大师": {
+    "state": "idle",
+    "detail": ""
+  },
+  "管理顾问": {
+    "state": "idle",
+    "detail": ""
+  },
+  "设计品味": {
+    "state": "executing",
+    "detail": ""
+  },
+  "AI工程师": {
+    "state": "idle",
+    "detail": "离线 31s"
+  },
+  "知识管理者": {
+    "state": "idle",
+    "detail": "离线 30s"
+  },
+  "软件工程师": {
+    "state": "executing",
+    "detail": ""
+  },
+  "技术负责人": {
+    "state": "idle",
+    "detail": ""
+  },
+  "产品经理": {
+    "state": "idle",
+    "detail": ""
+  },
+  "SRE工程师": {
+    "state": "idle",
+    "detail": ""
+  },
+  "像素办公室": {
+    "state": "idle",
+    "detail": ""
+  }
+}

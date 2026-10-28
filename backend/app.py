@@ -1284,6 +1284,53 @@ def health():
     })
 
 
+@app.route("/ds-bot-states", methods=["GET"])
+def ds_bot_states():
+    """返回所有 DSH Bot 的实时状态，供 YiVad 角色页轮询"""
+    try:
+        agents = load_agents_state()
+        # 尝试读取 bridge 共享的状态快照
+        bridge_states = {}
+        bridge_file = os.path.join(ROOT_DIR, "bridge-state.json")
+        if os.path.exists(bridge_file):
+            try:
+                with open(bridge_file, "r") as f:
+                    bridge_states = json.load(f)
+            except Exception:
+                pass
+
+        bots = []
+        for a in agents:
+            name = a.get("name", "")
+            state = a.get("state", "idle")
+            detail = a.get("detail", "")
+            area = a.get("area", "")
+            avatar = a.get("avatar", "")
+            is_main = a.get("isMain", False)
+            # bridge 数据优先（更实时）
+            if name in bridge_states:
+                state = bridge_states[name].get("state", state)
+                detail = bridge_states[name].get("detail", detail)
+
+            bots.append({
+                "name": name,
+                "state": state,
+                "detail": detail,
+                "area": area,
+                "avatar": avatar,
+                "isMain": is_main,
+            })
+
+        return jsonify({
+            "ok": True,
+            "total": len(bots),
+            "bots": bots,
+            "timestamp": datetime.now().isoformat(),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
 @app.route("/yesterday-memo", methods=["GET"])
 def get_yesterday_memo():
     """获取昨日小日记"""

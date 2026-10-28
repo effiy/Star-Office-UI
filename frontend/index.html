@@ -3619,7 +3619,26 @@ function toggleBrokerPanel() {
                     }).setOrigin(0.5);
                     nameText.setDepth(2601);
 
-                    guestSprites[id] = { sprite, nameText };
+                    // 活动气泡：显示 bot 当前正在做什么
+                    let detailBubble = null;
+                    const detailText = agent.detail || '';
+                    if (detailText && detailText.length > 0) {
+                        const shortDetail = detailText.length > 20 ? detailText.slice(0, 18) + '…' : detailText;
+                        const bubbleW = shortDetail.length * 8 + 20;
+                        const bubbleY = (p.y + yOffset) - (isDemo ? 50 : 80);
+                        const bubbleBg = game.add.rectangle(p.x, bubbleY, bubbleW, 20, 0x1a1a2e, 0.85).setOrigin(0.5);
+                        bubbleBg.setStrokeStyle(1, 0x7c3aed);
+                        const bubbleTxt = game.add.text(p.x, bubbleY, shortDetail, {
+                            fontFamily: 'ArkPixel, monospace',
+                            fontSize: '10px',
+                            fill: '#c4b89c',
+                            align: 'center'
+                        }).setOrigin(0.5);
+                        detailBubble = game.add.container(0, 0, [bubbleBg, bubbleTxt]);
+                        detailBubble.setDepth(2601);
+                    }
+
+                    guestSprites[id] = { sprite, nameText, detailBubble };
                 } else {
                     const g = guestSprites[id];
                     const yOffset = (DEMO_MODE && (agent.agentId === 'demo_mercury' || agent.name === '水星')) ? 10 : 0;
@@ -3988,6 +4007,7 @@ function toggleBrokerPanel() {
             // use smaller/new map version provided by user
             this.load.image('office_bg', '/static/office_bg_small.webp?v={{VERSION_TIMESTAMP}}');
             this.load.spritesheet('star_idle', '/static/star-idle-boba.png?v={{VERSION_TIMESTAMP}}', { frameWidth: 256, frameHeight: 256 });
+            this.load.image('star_boba', '/static/star-idle-boba.png?v={{VERSION_TIMESTAMP}}');
 
             // Furniture
             this.load.image('sofa_idle', '/static/sofa-idle-v3.png?v={{VERSION_TIMESTAMP}}');
@@ -4096,6 +4116,9 @@ function toggleBrokerPanel() {
             // Default: idle shows Star idle animation
             star.setVisible(true);
             star.anims.play('star_idle', true);
+
+            // Boba 覆盖层 — 确保主角精灵正常显示
+            window._starBoba = this.add.image(star.x, star.y, 'star_boba').setOrigin(0.5).setScale(IDLE_STAR_SCALE).setDepth(21);
 
             // Sofa stays static when idle (no longer the main idle animation)
             sofa.anims.stop();
