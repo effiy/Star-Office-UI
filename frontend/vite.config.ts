@@ -5,7 +5,17 @@ export default defineConfig({
   plugins: [vue()],
   root: ".",
   base: "./",
-  build: { outDir: "dist", assetsDir: "assets" },
+  build: {
+    outDir: "dist",
+    assetsDir: "assets",
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          "vendor-vue": ["vue", "pinia"],
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     proxy: {

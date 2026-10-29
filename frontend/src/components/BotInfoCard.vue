@@ -37,7 +37,7 @@ const props = defineProps<{ bot: Bot }>();
 defineEmits<{ close: [] }>();
 
 const stateLabel = computed(() => ({
-  idle: "空闲", executing: "工作中", writing: "输出中", offline: "离线",
+  idle: "空闲", writing: "写作中", researching: "研究中", executing: "执行中", syncing: "同步中", error: "出错",
 }[props.bot.state]));
 </script>
 

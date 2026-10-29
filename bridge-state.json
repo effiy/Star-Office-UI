@@ -1,7 +1,7 @@
 {
   "Chief": {
     "state": "idle",
-    "detail": "离线 30s"
+    "detail": ""
   },
   "Git管家": {
     "state": "idle",
@@ -13,7 +13,7 @@
   },
   "排版管家": {
     "state": "idle",
-    "detail": "离线 30s"
+    "detail": ""
   },
   "UB模式": {
     "state": "idle",
@@ -24,12 +24,12 @@
     "detail": ""
   },
   "Remotion大师": {
-    "state": "executing",
+    "state": "idle",
     "detail": ""
   },
   "管理顾问": {
     "state": "idle",
-    "detail": "离线 30s"
+    "detail": ""
   },
   "设计品味": {
     "state": "idle",
@@ -41,23 +41,23 @@
   },
   "知识管理者": {
     "state": "idle",
-    "detail": "离线 30s"
+    "detail": "离线 32s"
   },
   "软件工程师": {
     "state": "idle",
-    "detail": "离线 32s"
+    "detail": "离线 30s"
   },
   "技术负责人": {
     "state": "idle",
-    "detail": "离线 30s"
+    "detail": ""
   },
   "产品经理": {
     "state": "idle",
-    "detail": "离线 30s"
+    "detail": ""
   },
   "SRE工程师": {
     "state": "idle",
-    "detail": "离线 30s"
+    "detail": ""
   },
   "像素办公室": {
     "state": "idle",

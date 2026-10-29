@@ -44,6 +44,20 @@ last_inflight_mtime = 0
 bot_map = {}  # sessionId → name
 prev_active = set()
 
+# 楼层分配（与 Flask /office/floor/{n} 一致）
+FLOOR_MAP = {
+    1: ["Chief", "管理顾问", "技术负责人", "产品经理", "Readme管家"],
+    2: ["软件工程师", "AI工程师", "SRE工程师", "Git管家", "UB模式", "Vue3专家"],
+    3: ["Remotion大师", "排版管家", "设计品味", "知识管理者", "像素办公室"],
+}
+FLOOR_NAMES = {1: "管理决策层", 2: "工程执行层", 3: "创意内容层"}
+
+# 反向映射: bot name → floor
+BOT_FLOOR = {}
+for floor_num, names in FLOOR_MAP.items():
+    for name in names:
+        BOT_FLOOR[name] = floor_num
+
 
 def load_bot_names():
     global bot_map
@@ -107,11 +121,15 @@ async def handler(websocket):
     log.info(f"客户端连接: {remote} (共 {len(connected_clients)} 个)")
 
     try:
-        # 发送当前状态快照
+        # 发送当前状态快照（含楼层）
         snapshot = get_state_snapshot()
+        # 加 floor 信息
+        for name in snapshot:
+            snapshot[name]["floor"] = BOT_FLOOR.get(name, 0)
         await websocket.send(json.dumps({
             "type": "snapshot",
             "bots": snapshot,
+            "floor_summary": floor_active,
             "timestamp": datetime.now().isoformat(),
         }, ensure_ascii=False))
 
@@ -142,19 +160,30 @@ async def broadcast_updates():
             if current == prev_active:
                 continue  # 无变化
 
-            # 构建变化通知
+            # 构建变化通知（含楼层信息）
             changed = {}
             for name in current - prev_active:
-                changed[name] = "executing"
+                floor = BOT_FLOOR.get(name, 0)
+                changed[name] = {"state": "executing", "floor": floor}
             for name in prev_active - current:
-                changed[name] = "idle"
+                floor = BOT_FLOOR.get(name, 0)
+                changed[name] = {"state": "idle", "floor": floor}
 
             if not changed:
                 continue
 
+            # 统计各楼层活跃数
+            floor_active = {1: 0, 2: 0, 3: 0}
+            all_states = get_state_snapshot()
+            for name, info in all_states.items():
+                f = BOT_FLOOR.get(name, 0)
+                if f and info.get("state") != "idle":
+                    floor_active[f] = floor_active.get(f, 0) + 1
+
             message = json.dumps({
                 "type": "state_change",
                 "changes": changed,
+                "floor_summary": floor_active,
                 "timestamp": datetime.now().isoformat(),
             }, ensure_ascii=False)
 
