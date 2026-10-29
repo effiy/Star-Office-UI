@@ -24,7 +24,7 @@
     "detail": ""
   },
   "Remotion大师": {
-    "state": "idle",
+    "state": "executing",
     "detail": ""
   },
   "管理顾问": {
@@ -33,15 +33,15 @@
   },
   "设计品味": {
     "state": "idle",
-    "detail": "离线 30s"
+    "detail": ""
   },
   "AI工程师": {
     "state": "idle",
-    "detail": "离线 31s"
+    "detail": "离线 32s"
   },
   "知识管理者": {
     "state": "idle",
-    "detail": "离线 31s"
+    "detail": "离线 30s"
   },
   "软件工程师": {
     "state": "idle",

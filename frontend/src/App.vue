@@ -31,7 +31,7 @@ const gameContainer = ref<HTMLElement>();
 onMounted(async () => {
   await botStore.fetchBots();
   if (gameContainer.value) {
-    usePhaserGame(gameContainer.value);
+    usePhaserGame(gameContainer);
   }
 });
 </script>

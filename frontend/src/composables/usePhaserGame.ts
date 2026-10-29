@@ -5,7 +5,7 @@ import { onBeforeUnmount, type Ref } from "vue";
  * Mounts the Phaser canvas inside the provided container element.
  * Ensures Phaser rendering and Vue UI layer don't conflict.
  */
-export function usePhaserGame(container: Ref<HTMLElement>) {
+export function usePhaserGame(container: Ref<HTMLElement | undefined>) {
   let game: Phaser.Game | null = null;
   let resizeObserver: ResizeObserver | null = null;
 
