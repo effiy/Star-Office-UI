@@ -75,6 +75,8 @@ class BotState(BaseModel):
     stale: bool                # updated_at > 10s → true，前端置灰
 ```
 
+**状态枚举裁定（11-07 01:15，契约 Owner 铁甲）**：线上契约 = **7 态**（上方 Literal，DSH 原生粒度，Collector 不做塌缩；offline 由超时派生）。实测 YiVad `DshBotState` 现为 **5 态**（`YiVad/src/api/modules/botStatusService.ts:17`，无 researching/syncing）——v3 spec §2.1「与 YiVad 对齐（7 态）」表述与代码不符，以本裁定为准。YiVad 5 态定性为**本地视觉子集**：Phase 4 接总线时二选一（扩枚举到 7，或文档化 7→5 塌缩映射 researching/syncing→executing），届时由 YiVad 侧定并登记跨界变更单。T4 codegen 以 Pydantic 为唯一源；T5 按 7 态校验。
+
 YiAi 侧新 API（本轮已实现，见 §5-T1）：
 - `GET /roles` → 全部角色卡摘要 + bot 绑定（botId/botName）
 - `GET /roles/{role_id}` → 单卡全量（redLines/quickRefs/onboarding 原文）
