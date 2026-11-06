@@ -122,6 +122,28 @@ YiAi 侧新 API（本轮已实现，见 §5-T1）：
 - **Join 语义**：DSH state.json 的 bot id = `knowledge_roles.botId`（11-07 00:52 起由 roles-sync 每分钟自动刷新，当前 43/316 已绑定）。未绑定 bot：角色字段空，前端正常渲染、无角色卡 tooltip
 - **变更单**：11-07 00:56 已发跨项目联动枢纽（含销项证据：live 200/401/join 1-hit）；待 mac·企鹅 会签（ADR-002 D5）。入库：YiAi 747e1ec（签蟹）
 
+### 7.1 响应样例（live 抓取 11-07 01:2x，供 mock_yiai.py / test_yiai_contract.py 直接使用）
+
+**200 — GET /roles?status=active**（列表投影；`total` 随库变化，当时 316；条目按 order,title 排序，`order` 字段部分文档缺失属正常）：
+
+```json
+{"code": 0, "message": "success", "data": {"total": 316, "roles": [
+  {"key": "kr_api", "id": "api", "title": "API", "description": "…",
+   "icon": "📁", "color": "#909399", "tags": ["api","bot","ds-bot"],
+   "subdirsCount": 10, "redLinesCount": 0, "quickRefsCount": 0,
+   "knowledgeFileCount": 2, "status": "active",
+   "updatedAt": "2026-11-06T16:52:45.762761",
+   "botId": "session-f507abbe-…", "botName": "YiPet·API迁移·渡鸦"}
+]}}
+```
+
+**响应头**：`cache-control: public, max-age=60` + `etag`（Collector 仍须自建 60s TTL 缓存，HTTP 缓存不承担熔断降级）。
+**401 — 缺失/错误 X-Token**：HTTP 401，`{"code":1009,"message":"Invalid or missing headers","data":null}`。
+**404 — GET /roles/{不存在 id}**：HTTP 404，`{"code":1004,"message":"role not found: <id>","data":null}`。
+**200 — GET /roles/{id}**：`data` = 全量卡（另含 redLines[]（label/threshold/direction/unit/rationale）、quickRefs[]（want/file/icon/confidence）、onboarding[]、expertPerspective{}、domainsWord、structuralTags[]、subdirs[]）。
+
+**契约测试注意**：① 断言 `code` 数值（0/1009/1004）而非 `message` 字符串（措辞可变）；② `updatedAt` 为 Mongo naive-ISO UTC 字符串（无 Z 后缀）——BotState.updated_at 是 epoch ms，时区换算在 Collector 侧做，mock 须保持一致；③ `botId` 空串 = 未绑定 bot（合法值，非缺失字段）；④ join 用 botId 精确匹配，勿用 botName。
+
 ## 8. 第二波预研：YiAi 活动流调研结论（yiai_connector 选型，11-07 01:05 实测 Mongo ruiyi 库）
 
 | 候选源 | 数据形态 | 判定 |
