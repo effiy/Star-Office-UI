@@ -108,3 +108,26 @@ YiAi 侧新 API（本轮已实现，见 §5-T1）：
 - 分步：T2 上线时 :19001/:19003 先停写不停进程（观察 24h）→ 确认 Redis 路径稳定后删进程
 - 回滚：bridge-state.json fallback 常驻，Redis 或 YiAi 全挂时系统退化为现状（文件桥），不黑屏
 - 红线：部署/重启脚本永不代 commit 工作树；v2-dev 各自收口各自 commit
+
+## 7. YiAi 接入鉴权细则（Collector 凭证配置，ADR-002 D5 配套）
+
+- **Base URL**：`http://127.0.0.1:10086`（本机直连；macapi 公网隧道已纪律令 disable，勿依赖）
+- **鉴权**：请求头 `X-Token: <API_X_TOKEN>`。取值源：`~/Library/LaunchAgents/com.yivad.yiai.plist` 的 API_X_TOKEN；配置到 `Star-Office-UI/.env` 的 `YIAI_TOKEN`（.env 已 gitignore）。**永不进 git、永不进前端代码**
+- **Token 红线**：X-Token 只存在于服务端 Collector。浏览器不得持有 token → 前端要角色卡详情一律经 Collector(:19000) 代理一跳，不直连 YiAi（也规避 CORS）
+- **端点**：`GET /roles`（列表，`?bot_id=` join 过滤 / `?status=` 过滤，轻投影）；`GET /roles/{id}`（全量卡含 redLines/quickRefs 原文）
+- **缓存**：YiAi 响应已带 `Cache-Control: public, max-age=60` + ETag；Collector 侧另建自有 60s TTL 缓存（独立于 HTTP 缓存，专供熔断降级）
+- **熔断降级**：连续 3 次失败 → 熔断打开 → 供旧缓存（标 stale）→ 无缓存则 BotState 角色字段留空默认值；**永不阻塞 DSH 实时主线**。`/health` 暴露 `yiai_ok` / `yiai_cache_age_s`
+- **Join 语义**：DSH state.json 的 bot id = `knowledge_roles.botId`（11-07 00:52 起由 roles-sync 每分钟自动刷新，当前 43/316 已绑定）。未绑定 bot：角色字段空，前端正常渲染、无角色卡 tooltip
+- **变更单**：11-07 00:56 已发跨项目联动枢纽（含销项证据：live 200/401/join 1-hit）；待 mac·企鹅 会签（ADR-002 D5）。入库：YiAi 747e1ec（签蟹）
+
+## 8. 第二波预研：YiAi 活动流调研结论（yiai_connector 选型，11-07 01:05 实测 Mongo ruiyi 库）
+
+| 候选源 | 数据形态 | 判定 |
+|--------|----------|------|
+| `knowledge_files` roles/ 子树（524 文件已索引，含 path/updatedAt） | 各 bot 知识目录的最近写入 = 其工作痕迹 | ✅ **主信号**：30–60s delta 轮询，role 目录名 → knowledge_roles.botId join |
+| `knowledge_roles.updatedAt`（roles-sync 每分钟刷新） | 卡片级活动 | ✅ 次信号，与主信号同库顺手取 |
+| `audit_logs`（1754 条，actor/operation/timestamp） | API 级操作流水 | ❌ actor 仅 admin/anonymous，**无 bot 身份**——如需 per-API 活动，第二波立项 `X-Bot-Id` 请求头方案（触及鉴权面 = 红线级变更单 + 盾卫评审） |
+| `dashboard/live` SSE（5s KPI 推送） | 全局指标 | 🟡 可做办公室全局氛围层（非 per-bot 气泡） |
+| `agent_sessions` / `chat_records` | YiAi 自身 AI 会话 | ❌ 与 DSH bot 无关，排除 |
+
+**结论**：第二波 yiai_connector 以 knowledge_files delta 轮询为「在干什么」信号源，气泡内容 = 最近 N 条知识写入（文件名+时间）；v3 风险表「YiAi 鉴权未明(1009)」已解除——1009 = X-Token 中间件，细则见 §7。
