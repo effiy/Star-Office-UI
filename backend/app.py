@@ -1,48 +1,122 @@
 #!/usr/bin/env python3
-"""Star Office UI - Backend State Service"""
+"""Star Office UI - Backend State Service (FastAPI + Redis)"""
 
-from flask import Flask, jsonify, send_from_directory, make_response, request, session
-from datetime import datetime, timedelta
+from __future__ import annotations
+
 import json
+import logging
+import math
 import os
 import random
-import math
 import re
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from security_utils import is_production_mode, is_strong_secret, is_strong_drawer_pass
-from memo_utils import get_yesterday_date_str, sanitize_content, extract_memo_from_file
-from store_utils import (
-    load_agents_state as _store_load_agents_state,
-    save_agents_state as _store_save_agents_state,
-    load_asset_positions as _store_load_asset_positions,
-    save_asset_positions as _store_save_asset_positions,
-    load_asset_defaults as _store_load_asset_defaults,
-    save_asset_defaults as _store_save_asset_defaults,
-    load_runtime_config as _store_load_runtime_config,
-    save_runtime_config as _store_save_runtime_config,
-    load_join_keys as _store_load_join_keys,
-    save_join_keys as _store_save_join_keys,
-)
+from typing import Any, Optional
+
+# ── Auto-load .env file (R4 — persists env across bridge-watchdog restarts) ──
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+if _ENV_FILE.exists():
+    with open(_ENV_FILE, "r") as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _key, _, _val = _line.partition("=")
+            _key = _key.strip()
+            _val = _val.strip().strip('"').strip("'")
+            if _key and _key not in os.environ:  # don't override existing env
+                os.environ[_key] = _val
+    del _key, _val, _line, _f
+
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from starlette.middleware.sessions import SessionMiddleware
+
+# Use absolute backend.xxx imports when running as a package (uvicorn),
+# fall back to bare module imports when running directly (python backend/app.py).
+try:
+    from .memo_utils import extract_memo_from_file, get_yesterday_date_str, sanitize_content
+    from .security_utils import is_production_mode, is_strong_drawer_pass, is_strong_secret
+    from .store_redis import (
+        init_redis,
+        load_agents_state,
+        load_asset_defaults,
+        load_asset_positions,
+        load_join_keys,
+        load_runtime_config,
+        load_state,
+        redis_enabled,
+        save_agents_state,
+        save_asset_defaults,
+        save_asset_positions,
+        save_join_keys,
+        save_runtime_config,
+        save_state,
+    )
+except ImportError:
+    from memo_utils import extract_memo_from_file, get_yesterday_date_str, sanitize_content  # type: ignore
+    from security_utils import is_production_mode, is_strong_drawer_pass, is_strong_secret  # type: ignore
+    from store_redis import (  # type: ignore
+        init_redis,
+        load_agents_state,
+        load_asset_defaults,
+        load_asset_positions,
+        load_join_keys,
+        load_runtime_config,
+        load_state,
+        redis_enabled,
+        save_agents_state,
+        save_asset_defaults,
+        save_asset_positions,
+        save_join_keys,
+        save_runtime_config,
+        save_state,
+    )
+
+# YiAi cross-project client (graceful degradation when YiAi is unreachable)
+try:
+    from .yi_ai_client import fetch_health as _yi_ai_health, fetch_roles as _yi_ai_roles
+except ImportError:
+    from yi_ai_client import fetch_health as _yi_ai_health, fetch_roles as _yi_ai_roles  # type: ignore
+
+# DSH state collector — watchdog-based, single ingestion point (T2)
+try:
+    from .collector import start_collector as _start_collector, shutdown_collector as _shutdown_collector, get_latest_states as _get_latest_states, get_cached_roles as _get_cached_roles
+except ImportError:
+    from collector import start_collector as _start_collector, shutdown_collector as _shutdown_collector, get_latest_states as _get_latest_states, get_cached_roles as _get_cached_roles  # type: ignore
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-5s %(name)s  %(message)s")
+logger = logging.getLogger("star-office")
 
 try:
     from PIL import Image
 except Exception:
     Image = None
 
-# Paths (project-relative, no hardcoded absolute paths)
+# ═══════════════════════════════════════════════════════════
+#  Paths (project-relative)
+# ═══════════════════════════════════════════════════════════
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MEMORY_DIR = os.path.join(os.path.dirname(ROOT_DIR), "memory")
 FRONTEND_DIR = os.path.join(ROOT_DIR, "frontend")
+FRONTEND_DIST_DIR = os.path.join(FRONTEND_DIR, "dist")  # Vite build output
 FRONTEND_INDEX_FILE = os.path.join(FRONTEND_DIR, "index.html")
+FRONTEND_DIST_INDEX_FILE = os.path.join(FRONTEND_DIST_DIR, "index.html")
+# Prefer Vite build output when available; fall back to source for dev
+_INDEX_HTML_PATH = FRONTEND_DIST_INDEX_FILE if os.path.exists(FRONTEND_DIST_INDEX_FILE) else FRONTEND_INDEX_FILE
 FRONTEND_ELECTRON_STANDALONE_FILE = os.path.join(FRONTEND_DIR, "electron-standalone.html")
 STATE_FILE = os.path.join(ROOT_DIR, "state.json")
 AGENTS_STATE_FILE = os.path.join(ROOT_DIR, "agents-state.json")
 JOIN_KEYS_FILE = os.path.join(ROOT_DIR, "join-keys.json")
+# Use dist/ as the primary static root (Vite build), with source dir as fallback
+_STATIC_ROOTS = [d for d in (FRONTEND_DIST_DIR, FRONTEND_DIR) if os.path.isdir(d)]
 FRONTEND_PATH = Path(FRONTEND_DIR)
 ASSET_ALLOWED_EXTS = {".png", ".webp", ".jpg", ".jpeg", ".gif", ".svg", ".avif"}
 ASSET_TEMPLATE_ZIP = os.path.join(ROOT_DIR, "assets-replace-template.zip")
@@ -61,17 +135,18 @@ HOME_FAVORITES_DIR = os.path.join(ROOT_DIR, "assets", "home-favorites")
 HOME_FAVORITES_INDEX_FILE = os.path.join(HOME_FAVORITES_DIR, "index.json")
 HOME_FAVORITES_MAX = 30
 ASSET_POSITIONS_FILE = os.path.join(ROOT_DIR, "asset-positions.json")
-
-# 性能保护：默认关闭“每次打开页面随机换背景”，避免首页首屏被磁盘复制拖慢
-AUTO_ROTATE_HOME_ON_PAGE_OPEN = (os.getenv("AUTO_ROTATE_HOME_ON_PAGE_OPEN", "0").strip().lower() in {"1", "true", "yes", "on"})
-AUTO_ROTATE_MIN_INTERVAL_SECONDS = int(os.getenv("AUTO_ROTATE_MIN_INTERVAL_SECONDS", "60"))
-_last_home_rotate_at = 0
 ASSET_DEFAULTS_FILE = os.path.join(ROOT_DIR, "asset-defaults.json")
 RUNTIME_CONFIG_FILE = os.path.join(ROOT_DIR, "runtime-config.json")
 
-# Canonical agent states: single source of truth for validation and mapping
+# ═══════════════════════════════════════════════════════════
+#  Constants
+# ═══════════════════════════════════════════════════════════
+AUTO_ROTATE_HOME_ON_PAGE_OPEN = (os.getenv("AUTO_ROTATE_HOME_ON_PAGE_OPEN", "0").strip().lower() in {"1", "true", "yes", "on"})
+AUTO_ROTATE_MIN_INTERVAL_SECONDS = int(os.getenv("AUTO_ROTATE_MIN_INTERVAL_SECONDS", "60"))
+_last_home_rotate_at: float = 0.0
+
 VALID_AGENT_STATES = frozenset({"idle", "writing", "researching", "executing", "syncing", "error"})
-WORKING_STATES = frozenset({"writing", "researching", "executing"})  # subset used for auto-idle TTL
+WORKING_STATES = frozenset({"writing", "researching", "executing"})
 STATE_TO_AREA_MAP = {
     "idle": "breakroom",
     "writing": "writing",
@@ -81,240 +156,40 @@ STATE_TO_AREA_MAP = {
     "error": "error",
 }
 
+START_TIME = time.time()
 
-START_TIME = time.time()  # server start epoch for uptime calculation
-
-# Client-reported frontend metrics (updated by Phaser game via POST /client-metrics)
 client_metrics: dict = {
     "fps": 0,
     "usedJSHeapSize": 0,
     "totalJSHeapSize": 0,
     "jsHeapSizeLimit": 0,
-    "last_report_at": 0,
+    "last_report_at": 0.0,
 }
 
-app = Flask(__name__, static_folder=FRONTEND_DIR, static_url_path="/static")
-app.secret_key = os.getenv("FLASK_SECRET_KEY") or os.getenv("STAR_OFFICE_SECRET") or "star-office-dev-secret-change-me"
-
-# Session hardening
-app.config.update(
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=is_production_mode(),
-    PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
-)
-
-# Guard join-agent critical section to enforce per-key concurrency under parallel requests
 join_lock = threading.Lock()
 
-# Async background task registry for long-running operations (e.g. image generation)
-# Avoids Cloudflare 524 timeout (100s limit) by letting frontend poll for completion.
-_bg_tasks = {}  # task_id -> {"status": "pending"|"done"|"error", "result": ..., "error": ..., "created_at": ...}
+_bg_tasks: dict = {}
 _bg_tasks_lock = threading.Lock()
 
-# Generate a version timestamp once at server startup for cache busting
 VERSION_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 ASSET_DRAWER_PASS_DEFAULT = os.getenv("ASSET_DRAWER_PASS", "1234")
 
-if is_production_mode():
-    hardening_errors = []
-    if not is_strong_secret(str(app.secret_key)):
-        hardening_errors.append("FLASK_SECRET_KEY / STAR_OFFICE_SECRET is weak (need >=24 chars, non-default)")
-    if not is_strong_drawer_pass(ASSET_DRAWER_PASS_DEFAULT):
-        hardening_errors.append("ASSET_DRAWER_PASS is weak (do not use default 1234; recommend >=8 chars)")
-    if hardening_errors:
-        raise RuntimeError("Security hardening check failed in production mode: " + "; ".join(hardening_errors))
+USER_MODEL_TO_PROVIDER_MODELS = {
+    "nanobanana-pro": ["nano-banana-pro-preview"],
+    "nanobanana-2": ["gemini-2.5-flash-image"],
+}
+PROVIDER_MODEL_TO_USER_MODEL = {
+    provider: user
+    for user, providers in USER_MODEL_TO_PROVIDER_MODELS.items()
+    for provider in providers
+}
 
-
-def _is_asset_editor_authed() -> bool:
-    return bool(session.get("asset_editor_authed"))
-
-
-def _require_asset_editor_auth():
-    if _is_asset_editor_authed():
-        return None
-    return jsonify({"ok": False, "code": "UNAUTHORIZED", "msg": "Asset editor auth required"}), 401
-
-
-@app.after_request
-def add_no_cache_headers(response):
-    """Apply cache policy by path:
-    - HTML/API/state: no-cache (always fresh)
-    - /static assets (2xx only): long cache (filenames are versioned with ?v=VERSION_TIMESTAMP)
-    - /static assets (non-2xx, e.g. 404): no-cache to prevent CDN from caching errors
-    """
-    path = (request.path or "")
-    if path.startswith('/static/') and 200 <= response.status_code < 300:
-        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-        response.headers.pop("Pragma", None)
-        response.headers.pop("Expires", None)
-    else:
-        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
-    return response
-
-# Default state
-DEFAULT_STATE = {
+DEFAULT_STATE: dict = {
     "state": "idle",
     "detail": "等待任务中...",
     "progress": 0,
-    "updated_at": datetime.now().isoformat()
+    "updated_at": datetime.now().isoformat(),
 }
-
-
-def load_state():
-    """Load state from file.
-
-    Includes a simple auto-idle mechanism:
-    - If the last update is older than ttl_seconds (default 25s)
-      and the state is a "working" state, we fall back to idle.
-
-    This avoids the UI getting stuck at the desk when no new updates arrive.
-    """
-    state = None
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                state = json.load(f)
-        except Exception:
-            state = None
-
-    if not isinstance(state, dict):
-        state = dict(DEFAULT_STATE)
-
-    # Auto-idle
-    try:
-        ttl = int(state.get("ttl_seconds", 300))
-        updated_at = state.get("updated_at")
-        s = state.get("state", "idle")
-        if updated_at and s in WORKING_STATES:
-            # tolerate both with/without timezone
-            dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
-            # Use UTC for aware datetimes; local time for naive.
-            if dt.tzinfo:
-                from datetime import timezone
-                age = (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds()
-            else:
-                age = (datetime.now() - dt).total_seconds()
-            if age > ttl:
-                state["state"] = "idle"
-                state["detail"] = "待命中（自动回到休息区）"
-                state["progress"] = 0
-                state["updated_at"] = datetime.now().isoformat()
-                # persist the auto-idle so every client sees it consistently
-                try:
-                    save_state(state)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    return state
-
-
-def get_office_name_from_identity():
-    """Read office display name from OpenClaw workspace IDENTITY.md (Name field) -> 'XXX的办公室'."""
-    if not os.path.isfile(IDENTITY_FILE):
-        return None
-    try:
-        with open(IDENTITY_FILE, "r", encoding="utf-8") as f:
-            content = f.read()
-        m = re.search(r"-\s*\*\*Name:\*\*\s*(.+)", content)
-        if m:
-            name = m.group(1).strip().replace("\r", "").split("\n")[0].strip()
-            return f"{name}的办公室" if name else None
-    except Exception:
-        pass
-    return None
-
-
-def save_state(state: dict):
-    """Save state to file"""
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-
-
-def ensure_electron_standalone_snapshot():
-    """Create Electron standalone frontend snapshot once if missing.
-
-    The snapshot is intentionally decoupled from the browser page:
-    - browser uses frontend/index.html
-    - Electron uses frontend/electron-standalone.html
-    """
-    if os.path.exists(FRONTEND_ELECTRON_STANDALONE_FILE):
-        return
-    try:
-        shutil.copy2(FRONTEND_INDEX_FILE, FRONTEND_ELECTRON_STANDALONE_FILE)
-        print(f"[standalone] created: {FRONTEND_ELECTRON_STANDALONE_FILE}")
-    except Exception as e:
-        print(f"[standalone] create failed: {e}")
-
-
-# Initialize state
-if not os.path.exists(STATE_FILE):
-    save_state(DEFAULT_STATE)
-ensure_electron_standalone_snapshot()
-
-
-_INDEX_HTML_CACHE = None
-
-
-@app.route("/", methods=["GET"])
-def index():
-    """Serve the pixel office UI with built-in version cache busting"""
-    # 默认禁用页面打开即换背景，避免首屏慢
-    # 如需启用，可配置 AUTO_ROTATE_HOME_ON_PAGE_OPEN=1
-    _maybe_apply_random_home_favorite()
-
-    global _INDEX_HTML_CACHE
-    if _INDEX_HTML_CACHE is None:
-        with open(FRONTEND_INDEX_FILE, "r", encoding="utf-8") as f:
-            raw_html = f.read()
-        _INDEX_HTML_CACHE = raw_html.replace("{{VERSION_TIMESTAMP}}", VERSION_TIMESTAMP)
-
-    resp = make_response(_INDEX_HTML_CACHE)
-    resp.headers["Content-Type"] = "text/html; charset=utf-8"
-    return resp
-
-
-@app.route("/electron-standalone", methods=["GET"])
-def electron_standalone_page():
-    """Serve Electron-only standalone frontend page."""
-    ensure_electron_standalone_snapshot()
-    target = FRONTEND_ELECTRON_STANDALONE_FILE
-    if not os.path.exists(target):
-        target = FRONTEND_INDEX_FILE
-    with open(target, "r", encoding="utf-8") as f:
-        html = f.read()
-    html = html.replace("{{VERSION_TIMESTAMP}}", VERSION_TIMESTAMP)
-    resp = make_response(html)
-    resp.headers["Content-Type"] = "text/html; charset=utf-8"
-    return resp
-
-    resp.headers["Content-Type"] = "text/html; charset=utf-8"
-    return resp
-
-
-@app.route("/join", methods=["GET"])
-def join_page():
-    """Serve the agent join page"""
-    with open(os.path.join(FRONTEND_DIR, "join.html"), "r", encoding="utf-8") as f:
-        html = f.read()
-    resp = make_response(html)
-    resp.headers["Content-Type"] = "text/html; charset=utf-8"
-    return resp
-
-
-@app.route("/invite", methods=["GET"])
-def invite_page():
-    """Serve human-facing invite instruction page"""
-    with open(os.path.join(FRONTEND_DIR, "invite.html"), "r", encoding="utf-8") as f:
-        html = f.read()
-    resp = make_response(html)
-    resp.headers["Content-Type"] = "text/html; charset=utf-8"
-    return resp
-
 
 DEFAULT_AGENTS = [
     {
@@ -329,43 +204,306 @@ DEFAULT_AGENTS = [
         "joinKey": None,
         "authStatus": "approved",
         "authExpiresAt": None,
-        "lastPushAt": None
+        "lastPushAt": None,
     }
 ]
 
+# ═══════════════════════════════════════════════════════════
+#  FastAPI App
+# ═══════════════════════════════════════════════════════════
+app = FastAPI(
+    title="Star Office UI",
+    version="2.0.0",
+    docs_url="/docs" if not is_production_mode() else None,
+    redoc_url=None,
+)
 
-def load_agents_state():
-    return _store_load_agents_state(AGENTS_STATE_FILE, DEFAULT_AGENTS)
+SECRET_KEY = os.getenv("STAR_OFFICE_SECRET") or os.getenv("FLASK_SECRET_KEY") or "star-office-dev-secret-change-me"
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SECRET_KEY,
+    session_cookie="star_office_session",
+    https_only=is_production_mode(),
+    same_site="lax",
+    max_age=43200,  # 12 hours
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ═══════════════════════════════════════════════════════════
+#  Middleware: no-cache headers
+# ═══════════════════════════════════════════════════════════
+@app.middleware("http")
+async def cache_control_middleware(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path or ""
+    if path.startswith("/static/") or path.startswith("/assets/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        # MutableHeaders doesn't support .pop(); use __delitem__
+        for _hdr in ("Pragma", "Expires"):
+            if _hdr in response.headers:
+                del response.headers[_hdr]
+    else:
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 
-def save_agents_state(agents):
-    _store_save_agents_state(AGENTS_STATE_FILE, agents)
+# ═══════════════════════════════════════════════════════════
+#  Startup / Shutdown
+# ═══════════════════════════════════════════════════════════
+@app.on_event("startup")
+def startup():
+    """Initialize Redis and ensure state files exist."""
+    init_redis()
+    if redis_enabled():
+        logger.info("Redis session storage: available ✓")
+    else:
+        logger.warning("Redis not available — using JSON file fallback")
+
+    if not os.path.exists(STATE_FILE):
+        save_state(STATE_FILE, DEFAULT_STATE)
+    if not os.path.exists(AGENTS_STATE_FILE):
+        save_agents_state(AGENTS_STATE_FILE, DEFAULT_AGENTS)
+    if not os.path.exists(JOIN_KEYS_FILE):
+        sample_path = os.path.join(ROOT_DIR, "join-keys.sample.json")
+        if os.path.exists(sample_path):
+            try:
+                with open(sample_path, "r", encoding="utf-8") as sf:
+                    sample = json.load(sf)
+                save_join_keys(JOIN_KEYS_FILE, sample if isinstance(sample, dict) else {"keys": []})
+            except Exception:
+                save_join_keys(JOIN_KEYS_FILE, {"keys": []})
+        else:
+            save_join_keys(JOIN_KEYS_FILE, {"keys": []})
+
+    # Secure runtime-config file perms
+    if os.path.exists(RUNTIME_CONFIG_FILE):
+        try:
+            os.chmod(RUNTIME_CONFIG_FILE, 0o600)
+        except Exception:
+            pass
+
+    # Electron standalone snapshot
+    if not os.path.exists(FRONTEND_ELECTRON_STANDALONE_FILE):
+        try:
+            shutil.copy2(_INDEX_HTML_PATH, FRONTEND_ELECTRON_STANDALONE_FILE)
+            logger.info("[standalone] created: %s", FRONTEND_ELECTRON_STANDALONE_FILE)
+        except Exception as e:
+            logger.warning("[standalone] create failed: %s", e)
+
+    # Security hardening
+    if is_production_mode():
+        hardening_errors = []
+        if not is_strong_secret(str(SECRET_KEY)):
+            hardening_errors.append("STAR_OFFICE_SECRET / FLASK_SECRET_KEY is weak (need >=24 chars, non-default)")
+        if not is_strong_drawer_pass(ASSET_DRAWER_PASS_DEFAULT):
+            hardening_errors.append("ASSET_DRAWER_PASS is weak (do not use default 1234; recommend >=8 chars)")
+        if hardening_errors:
+            raise RuntimeError("Security hardening check failed in production mode: " + "; ".join(hardening_errors))
+
+    logger.info("Star Office backend ready (FastAPI + %s)", "Redis" if redis_enabled() else "JSON files")
+
+    # T2: Start DSH state collector (watchdog → Redis → PUBLISH)
+    # Replaces legacy dsh_server (:19003) and ds_bot_watcher processes.
+    try:
+        _start_collector()
+        logger.info("DSH state collector started (watchdog)")
+    except Exception as e:
+        logger.warning("DSH collector failed to start (non-fatal): %s", e)
 
 
-def load_asset_positions():
-    return _store_load_asset_positions(ASSET_POSITIONS_FILE)
+@app.on_event("shutdown")
+def shutdown():
+    """Gracefully stop background services."""
+    try:
+        _shutdown_collector()
+        logger.info("DSH state collector stopped")
+    except Exception:
+        pass
 
 
-def save_asset_positions(data):
-    _store_save_asset_positions(ASSET_POSITIONS_FILE, data)
+# ═══════════════════════════════════════════════════════════
+#  Helpers
+# ═══════════════════════════════════════════════════════════
+_INDEX_HTML_CACHE: Optional[str] = None
 
 
-def load_asset_defaults():
-    return _store_load_asset_defaults(ASSET_DEFAULTS_FILE)
+def _is_asset_editor_authed(request: Request) -> bool:
+    return bool(request.session.get("asset_editor_authed"))
 
 
-def save_asset_defaults(data):
-    _store_save_asset_defaults(ASSET_DEFAULTS_FILE, data)
+def _require_asset_editor_auth(request: Request) -> Optional[JSONResponse]:
+    if _is_asset_editor_authed(request):
+        return None
+    return JSONResponse(
+        status_code=401,
+        content={"ok": False, "code": "UNAUTHORIZED", "msg": "Asset editor auth required"},
+    )
 
 
-def load_runtime_config():
-    return _store_load_runtime_config(RUNTIME_CONFIG_FILE)
+def normalize_agent_state(s: Optional[str]) -> str:
+    if not s:
+        return "idle"
+    s_lower = s.lower().strip()
+    if s_lower in {"working", "busy", "write"}:
+        return "writing"
+    if s_lower in {"run", "running", "execute", "exec"}:
+        return "executing"
+    if s_lower in {"sync"}:
+        return "syncing"
+    if s_lower in {"research", "search"}:
+        return "researching"
+    if s_lower in VALID_AGENT_STATES:
+        return s_lower
+    return "idle"
 
 
-def save_runtime_config(data):
-    _store_save_runtime_config(RUNTIME_CONFIG_FILE, data)
+def state_to_area(state: str) -> str:
+    return STATE_TO_AREA_MAP.get(state, "breakroom")
 
 
+def _normalize_user_model(model_name: str) -> str:
+    m = (model_name or "").strip()
+    if not m:
+        return "nanobanana-pro"
+    low = m.lower()
+    if low in USER_MODEL_TO_PROVIDER_MODELS:
+        return low
+    if low in PROVIDER_MODEL_TO_USER_MODEL:
+        return PROVIDER_MODEL_TO_USER_MODEL[low]
+    return "nanobanana-pro"
+
+
+def _provider_model_candidates(user_model: str) -> list:
+    normalized = _normalize_user_model(user_model)
+    return list(USER_MODEL_TO_PROVIDER_MODELS.get(normalized, USER_MODEL_TO_PROVIDER_MODELS["nanobanana-pro"]))
+
+
+def get_office_name_from_identity() -> Optional[str]:
+    if not os.path.isfile(IDENTITY_FILE):
+        return None
+    try:
+        with open(IDENTITY_FILE, "r", encoding="utf-8") as f:
+            content = f.read()
+        m = re.search(r"-\s*\*\*Name:\*\*\s*(.+)", content)
+        if m:
+            name = m.group(1).strip().replace("\r", "").split("\n")[0].strip()
+            return f"{name}的办公室" if name else None
+    except Exception:
+        pass
+    return None
+
+
+# ── Store delegation wrappers ──────────────────────────────
+def _load_state() -> dict:
+    state = load_state(STATE_FILE, DEFAULT_STATE)
+    if not isinstance(state, dict):
+        state = dict(DEFAULT_STATE)
+    # Auto-idle
+    try:
+        ttl = int(state.get("ttl_seconds", 300))
+        updated_at = state.get("updated_at")
+        s = state.get("state", "idle")
+        if updated_at and s in WORKING_STATES:
+            dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            if dt.tzinfo:
+                age = (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds()
+            else:
+                age = (datetime.now() - dt).total_seconds()
+            if age > ttl:
+                state["state"] = "idle"
+                state["detail"] = "待命中（自动回到休息区）"
+                state["progress"] = 0
+                state["updated_at"] = datetime.now().isoformat()
+                try:
+                    save_state(STATE_FILE, state)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return state
+
+
+def _save_state(state: dict) -> None:
+    save_state(STATE_FILE, state)
+
+
+def _load_agents_state() -> list:
+    return load_agents_state(AGENTS_STATE_FILE, DEFAULT_AGENTS)
+
+
+def _save_agents_state(agents: list) -> None:
+    save_agents_state(AGENTS_STATE_FILE, agents)
+
+
+def _load_asset_positions() -> dict:
+    return load_asset_positions(ASSET_POSITIONS_FILE)
+
+
+def _save_asset_positions(data: dict) -> None:
+    save_asset_positions(ASSET_POSITIONS_FILE, data)
+
+
+def _load_asset_defaults() -> dict:
+    return load_asset_defaults(ASSET_DEFAULTS_FILE)
+
+
+def _save_asset_defaults(data: dict) -> None:
+    save_asset_defaults(ASSET_DEFAULTS_FILE, data)
+
+
+def _load_runtime_config() -> dict:
+    return load_runtime_config(RUNTIME_CONFIG_FILE)
+
+
+def _save_runtime_config(data: dict) -> None:
+    save_runtime_config(RUNTIME_CONFIG_FILE, data)
+
+
+def _load_join_keys() -> dict:
+    return load_join_keys(JOIN_KEYS_FILE)
+
+
+def _save_join_keys(data: dict) -> None:
+    save_join_keys(JOIN_KEYS_FILE, data)
+
+
+def _load_floor_registry() -> dict:
+    """加载楼层分配注册表（floor-registry.json），不存在时回退到硬编码默认值"""
+    registry_file = os.path.join(ROOT_DIR, "floor-registry.json")
+    try:
+        if os.path.exists(registry_file):
+            with open(registry_file, "r") as f:
+                registry = json.load(f)
+            floor_map = {}
+            for key, names in registry.items():
+                if key.startswith("_"):
+                    continue
+                try:
+                    floor_num = int(key[0])
+                except ValueError:
+                    continue
+                floor_map[floor_num] = names
+            if floor_map:
+                return floor_map
+    except Exception:
+        pass
+    # 默认回退：16 bot 硬编码
+    return {
+        1: ["Chief", "管理顾问", "技术负责人", "产品经理", "Readme管家"],
+        2: ["软件工程师", "AI工程师", "SRE工程师", "Git管家", "UB模式", "Vue3专家"],
+        3: ["Remotion大师", "排版管家", "设计品味", "知识管理者", "像素办公室"],
+    }
+
+
+# ── Home favorites ─────────────────────────────────────────
 def _ensure_home_favorites_index():
     os.makedirs(HOME_FAVORITES_DIR, exist_ok=True)
     if not os.path.exists(HOME_FAVORITES_INDEX_FILE):
@@ -392,17 +530,13 @@ def _save_home_favorites_index(data):
 
 
 def _maybe_apply_random_home_favorite():
-    """On page open, randomly apply one saved home favorite if available."""
     global _last_home_rotate_at
-
     if not AUTO_ROTATE_HOME_ON_PAGE_OPEN:
         return False, "disabled"
-
     try:
         now_ts = datetime.now().timestamp()
         if _last_home_rotate_at and (now_ts - _last_home_rotate_at) < AUTO_ROTATE_MIN_INTERVAL_SECONDS:
             return False, "throttled"
-
         idx = _load_home_favorites_index()
         items = idx.get("items") or []
         candidates = []
@@ -413,15 +547,12 @@ def _maybe_apply_random_home_favorite():
             abs_path = os.path.join(ROOT_DIR, rel)
             if os.path.exists(abs_path):
                 candidates.append((rel, abs_path))
-
         if not candidates:
             return False, "no-favorites"
-
         rel, src = random.choice(candidates)
         target = FRONTEND_PATH / "office_bg_small.webp"
         if not target.exists():
             return False, "missing-office-bg"
-
         shutil.copy2(src, str(target))
         _last_home_rotate_at = now_ts
         return True, rel
@@ -429,14 +560,7 @@ def _maybe_apply_random_home_favorite():
         return False, str(e)
 
 
-def load_join_keys():
-    return _store_load_join_keys(JOIN_KEYS_FILE)
-
-
-def save_join_keys(data):
-    _store_save_join_keys(JOIN_KEYS_FILE, data)
-
-
+# ── Image/animation utilities ──────────────────────────────
 def _ensure_magick_or_ffmpeg_available():
     if shutil.which("magick"):
         return "magick"
@@ -446,7 +570,6 @@ def _ensure_magick_or_ffmpeg_available():
 
 
 def _probe_animated_frame_size(upload_path: str):
-    """Return (w,h) from first frame if possible."""
     if Image is not None:
         try:
             with Image.open(upload_path) as im:
@@ -454,7 +577,6 @@ def _probe_animated_frame_size(upload_path: str):
                 return int(w), int(h)
         except Exception:
             pass
-    # ffprobe fallback
     if shutil.which("ffprobe"):
         try:
             cmd = [
@@ -480,10 +602,9 @@ def _animated_to_spritesheet(
     out_ext: str = ".webp",
     preserve_original: bool = True,
     pixel_art: bool = True,
-    cols: int | None = None,
-    rows: int | None = None,
+    cols: Optional[int] = None,
+    rows: Optional[int] = None,
 ):
-    """Convert animated GIF/WEBP to spritesheet, return (out_path, columns, rows, frames, out_frame_w, out_frame_h)."""
     backend = _ensure_magick_or_ffmpeg_available()
     if not backend:
         raise RuntimeError("未检测到 ImageMagick/ffmpeg，无法自动转换动图")
@@ -502,7 +623,6 @@ def _animated_to_spritesheet(
             try:
                 with Image.open(upload_path) as im:
                     n = getattr(im, "n_frames", 1)
-                    # 默认保留用户原始帧尺寸（避免先压缩再放大导致像素糊）
                     if preserve_original:
                         out_fw, out_fh = im.size
                     for i in range(n):
@@ -526,16 +646,13 @@ def _animated_to_spritesheet(
                 raise RuntimeError("动图无有效帧")
 
         if backend == "magick":
-            # 像素风动图转精灵表默认无损，避免颜色/边缘被压缩糊掉
             quality_flag = "-define webp:lossless=true -define webp:method=6 -quality 100" if ext == ".webp" else ""
-            # 允许按 cols/rows 排布；默认单行
             if cols is None or cols <= 0:
                 cols_eff = frames
             else:
                 cols_eff = max(1, int(cols))
             rows_eff = max(1, int(rows)) if (rows is not None and rows > 0) else max(1, math.ceil(frames / cols_eff))
 
-            # 先规范单帧尺寸
             prep = ""
             if not preserve_original:
                 magick_filter = "-filter point" if pixel_art else ""
@@ -572,70 +689,14 @@ def _animated_to_spritesheet(
         return out_path, frames, 1, frames, out_fw, out_fh
 
 
-def normalize_agent_state(s):
-    """Normalize agent state for compatibility.
-    Maps synonyms (e.g. working/busy -> writing, run/running -> executing) into VALID_AGENT_STATES.
-    Returns 'idle' for unknown values.
-    """
-    if not s:
-        return 'idle'
-    s_lower = s.lower().strip()
-    if s_lower in {'working', 'busy', 'write'}:
-        return 'writing'
-    if s_lower in {'run', 'running', 'execute', 'exec'}:
-        return 'executing'
-    if s_lower in {'sync'}:
-        return 'syncing'
-    if s_lower in {'research', 'search'}:
-        return 'researching'
-    if s_lower in VALID_AGENT_STATES:
-        return s_lower
-    return 'idle'
-
-
-# User-facing model aliases -> provider model ids
-USER_MODEL_TO_PROVIDER_MODELS = {
-    # 严格按用户要求：仅两种官方模型映射
-    "nanobanana-pro": [
-        "nano-banana-pro-preview",
-    ],
-    "nanobanana-2": [
-        "gemini-2.5-flash-image",
-    ],
-}
-
-PROVIDER_MODEL_TO_USER_MODEL = {
-    provider: user
-    for user, providers in USER_MODEL_TO_PROVIDER_MODELS.items()
-    for provider in providers
-}
-
-
-def _normalize_user_model(model_name: str) -> str:
-    m = (model_name or "").strip()
-    if not m:
-        return "nanobanana-pro"
-    low = m.lower()
-    if low in USER_MODEL_TO_PROVIDER_MODELS:
-        return low
-    if low in PROVIDER_MODEL_TO_USER_MODEL:
-        return PROVIDER_MODEL_TO_USER_MODEL[low]
-    return "nanobanana-pro"
-
-
-def _provider_model_candidates(user_model: str):
-    normalized = _normalize_user_model(user_model)
-    return list(USER_MODEL_TO_PROVIDER_MODELS.get(normalized, USER_MODEL_TO_PROVIDER_MODELS["nanobanana-pro"]))
-
-
-def _generate_rpg_background_to_webp(out_webp_path: str, width: int = 1280, height: int = 720, custom_prompt: str = "", speed_mode: str = "fast"):
-    """Generate RPG-style room background and save as webp.
-
-    speed_mode:
-      - fast: use nanobanana-2 + 1024x576 intermediate + downscaled reference (faster)
-      - quality: use configured model (fallback nanobanana-pro) + full 1280x720 path
-    """
-    runtime_cfg = load_runtime_config()
+def _generate_rpg_background_to_webp(
+    out_webp_path: str,
+    width: int = 1280,
+    height: int = 720,
+    custom_prompt: str = "",
+    speed_mode: str = "fast",
+):
+    runtime_cfg = _load_runtime_config()
     api_key = (runtime_cfg.get("gemini_api_key") or "").strip()
     if not api_key:
         raise RuntimeError("MISSING_API_KEY")
@@ -658,7 +719,6 @@ def _generate_rpg_background_to_webp(out_webp_path: str, width: int = 1280, heig
     if not style_hint:
         style_hint = theme
 
-    # 默认使用更稳妥的 quality 档，避免 fast 模型在部分 API 通道不可用
     mode = (speed_mode or "quality").strip().lower()
     if mode not in {"fast", "quality"}:
         mode = "quality"
@@ -666,7 +726,6 @@ def _generate_rpg_background_to_webp(out_webp_path: str, width: int = 1280, heig
     configured_user_model = _normalize_user_model(runtime_cfg.get("gemini_model") or "nanobanana-pro")
     if mode == "fast":
         preferred_user_model = "nanobanana-2"
-        # fast 也提高基础清晰度：从 1024x576 提升到 1152x648（牺牲少量速度）
         gen_width, gen_height = 1152, 648
         ref_width, ref_height = 1152, 648
     else:
@@ -674,8 +733,6 @@ def _generate_rpg_background_to_webp(out_webp_path: str, width: int = 1280, heig
         gen_width, gen_height = width, height
         ref_width, ref_height = width, height
 
-    # 同时规避可能触发 400 的特殊能力参数：
-    # 仅 nanobanana-2 走 aspect-ratio，nanobanana-pro 交给模型默认比例（后续再标准化到 1280x720）
     allow_aspect_ratio = (preferred_user_model == "nanobanana-2")
 
     prompt = (
@@ -698,7 +755,6 @@ def _generate_rpg_background_to_webp(out_webp_path: str, width: int = 1280, heig
     if allow_aspect_ratio:
         cmd.extend(["--aspect-ratio", "16:9"])
 
-    # 强约束：每次都带固定参考图，保持房间区域布局不漂移
     ref_for_call = None
     if os.path.exists(ROOM_REFERENCE_IMAGE):
         ref_for_call = ROOM_REFERENCE_IMAGE
@@ -716,7 +772,6 @@ def _generate_rpg_background_to_webp(out_webp_path: str, width: int = 1280, heig
         cmd.extend(["--reference-image", ref_for_call])
 
     env = os.environ.copy()
-    # 运行时配置优先：只保留 GEMINI_API_KEY，避免脚本因双 key 报错
     env.pop("GOOGLE_API_KEY", None)
     env["GEMINI_API_KEY"] = api_key
 
@@ -744,15 +799,12 @@ def _generate_rpg_background_to_webp(out_webp_path: str, width: int = 1280, heig
             m.extend(["--model", model_name])
         return m
 
-    # 模型多级回退（仅允许两类用户模型：nanobanana-pro / nanobanana-2）
-    # 每个用户模型映射到若干 provider 真实模型。
     user_model_order = [preferred_user_model, configured_user_model]
     user_model_order = [m for i, m in enumerate(user_model_order) if m and m not in user_model_order[:i]]
 
     model_candidates = []
     for um in user_model_order:
         model_candidates.extend(_provider_model_candidates(um))
-    # 去重并清理空项
     model_candidates = [m for i, m in enumerate(model_candidates) if m and m not in model_candidates[:i]]
 
     proc = None
@@ -769,7 +821,6 @@ def _generate_rpg_background_to_webp(out_webp_path: str, width: int = 1280, heig
         err_text = (proc.stderr or proc.stdout or "").strip()
         last_err_text = err_text
 
-        # key 失效/泄漏：立即终止，不继续尝试
         low = err_text.lower()
         if "your api key was reported as leaked" in low or "permission_denied" in low:
             raise RuntimeError("API_KEY_REVOKED_OR_LEAKED")
@@ -778,7 +829,6 @@ def _generate_rpg_background_to_webp(out_webp_path: str, width: int = 1280, heig
             model_unavailable_count += 1
             continue
 
-        # 非模型不可用错误，直接返回真实错误
         raise RuntimeError(f"生图失败: {err_text}")
 
     if proc is None or proc.returncode != 0:
@@ -806,55 +856,65 @@ def _generate_rpg_background_to_webp(out_webp_path: str, width: int = 1280, heig
 
     with Image.open(gen_path) as im:
         im = im.convert("RGBA")
-        # 质量模式优先保细节；快速模式优先速度
         if mode == "fast":
             im = im.resize((gen_width, gen_height), Image.Resampling.LANCZOS)
             if (gen_width, gen_height) != (width, height):
-                # fast 的放大改为 LANCZOS，牺牲少量速度换更高细节
                 im = im.resize((width, height), Image.Resampling.LANCZOS)
             im.save(out_webp_path, "WEBP", quality=96, method=6)
         else:
-            # quality：确保输出标准尺寸，同时使用无损 webp，减少压缩损失
             if im.size != (width, height):
                 im = im.resize((width, height), Image.Resampling.LANCZOS)
             im.save(out_webp_path, "WEBP", lossless=True, quality=100, method=6)
 
 
-def state_to_area(state):
-    """Map agent state to office area (breakroom / writing / error)."""
-    return STATE_TO_AREA_MAP.get(state, "breakroom")
+# ═══════════════════════════════════════════════════════════
+#  Routes — Pages
+# ═══════════════════════════════════════════════════════════
+@app.get("/", response_class=HTMLResponse)
+def index():
+    _maybe_apply_random_home_favorite()
+    global _INDEX_HTML_CACHE
+    if _INDEX_HTML_CACHE is None:
+        with open(_INDEX_HTML_PATH, "r", encoding="utf-8") as f:
+            raw_html = f.read()
+        _INDEX_HTML_CACHE = raw_html.replace("{{VERSION_TIMESTAMP}}", VERSION_TIMESTAMP)
+    return HTMLResponse(content=_INDEX_HTML_CACHE)
 
 
-# Ensure files exist
-if not os.path.exists(AGENTS_STATE_FILE):
-    save_agents_state(DEFAULT_AGENTS)
-if not os.path.exists(JOIN_KEYS_FILE):
-    if os.path.exists(os.path.join(ROOT_DIR, "join-keys.sample.json")):
-        try:
-            with open(os.path.join(ROOT_DIR, "join-keys.sample.json"), "r", encoding="utf-8") as sf:
-                sample = json.load(sf)
-            save_join_keys(sample if isinstance(sample, dict) else {"keys": []})
-        except Exception:
-            save_join_keys({"keys": []})
-    else:
-        save_join_keys({"keys": []})
-
-# Tighten runtime-config file perms if exists
-if os.path.exists(RUNTIME_CONFIG_FILE):
-    try:
-        os.chmod(RUNTIME_CONFIG_FILE, 0o600)
-    except Exception:
-        pass
+@app.get("/electron-standalone", response_class=HTMLResponse)
+def electron_standalone_page():
+    target = FRONTEND_ELECTRON_STANDALONE_FILE
+    if not os.path.exists(target):
+        target = FRONTEND_INDEX_FILE
+    with open(target, "r", encoding="utf-8") as f:
+        html = f.read()
+    html = html.replace("{{VERSION_TIMESTAMP}}", VERSION_TIMESTAMP)
+    return HTMLResponse(content=html)
 
 
-@app.route("/agents", methods=["GET"])
+@app.get("/join", response_class=HTMLResponse)
+def join_page():
+    with open(os.path.join(FRONTEND_DIR, "join.html"), "r", encoding="utf-8") as f:
+        html = f.read()
+    return HTMLResponse(content=html)
+
+
+@app.get("/invite", response_class=HTMLResponse)
+def invite_page():
+    with open(os.path.join(FRONTEND_DIR, "invite.html"), "r", encoding="utf-8") as f:
+        html = f.read()
+    return HTMLResponse(content=html)
+
+
+# ═══════════════════════════════════════════════════════════
+#  Routes — Agents
+# ═══════════════════════════════════════════════════════════
+@app.get("/agents")
 def get_agents():
-    """Get full agents list (for multi-agent UI), with auto-cleanup on access"""
-    agents = load_agents_state()
+    agents = _load_agents_state()
     now = datetime.now()
-
     cleaned_agents = []
-    keys_data = load_join_keys()
+    keys_data = _load_join_keys()
 
     for a in agents:
         if a.get("isMain"):
@@ -864,7 +924,6 @@ def get_agents():
         auth_expires_at_str = a.get("authExpiresAt")
         auth_status = a.get("authStatus", "pending")
 
-        # 1) 超时未批准自动 leave
         if auth_status == "pending" and auth_expires_at_str:
             try:
                 auth_expires_at = datetime.fromisoformat(auth_expires_at_str)
@@ -881,69 +940,62 @@ def get_agents():
             except Exception:
                 pass
 
-        # 2) 超时未推送自动离线（超过5分钟）
         last_push_at_str = a.get("lastPushAt")
         if auth_status == "approved" and last_push_at_str:
             try:
                 last_push_at = datetime.fromisoformat(last_push_at_str)
                 age = (now - last_push_at).total_seconds()
-                if age > 300:  # 5分钟无推送自动离线
+                if age > 300:
                     a["authStatus"] = "offline"
             except Exception:
                 pass
 
         cleaned_agents.append(a)
 
-    save_agents_state(cleaned_agents)
-    save_join_keys(keys_data)
+    _save_agents_state(cleaned_agents)
+    _save_join_keys(keys_data)
+    return cleaned_agents
 
-    return jsonify(cleaned_agents)
 
-
-@app.route("/agent-approve", methods=["POST"])
-def agent_approve():
-    """Approve an agent (set authStatus to approved)"""
+@app.post("/agent-approve")
+def agent_approve(data: dict):
     try:
-        data = request.get_json()
         agent_id = (data.get("agentId") or "").strip()
         if not agent_id:
-            return jsonify({"ok": False, "msg": "缺少 agentId"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "缺少 agentId"})
 
-        agents = load_agents_state()
+        agents = _load_agents_state()
         target = next((a for a in agents if a.get("agentId") == agent_id and not a.get("isMain")), None)
         if not target:
-            return jsonify({"ok": False, "msg": "未找到 agent"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "未找到 agent"})
 
         target["authStatus"] = "approved"
         target["authApprovedAt"] = datetime.now().isoformat()
-        target["authExpiresAt"] = (datetime.now() + timedelta(hours=24)).isoformat()  # 默认授权24h
+        target["authExpiresAt"] = (datetime.now() + timedelta(hours=24)).isoformat()
 
-        save_agents_state(agents)
-        return jsonify({"ok": True, "agentId": agent_id, "authStatus": "approved"})
+        _save_agents_state(agents)
+        return {"ok": True, "agentId": agent_id, "authStatus": "approved"}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/agent-reject", methods=["POST"])
-def agent_reject():
-    """Reject an agent (set authStatus to rejected and optionally revoke key)"""
+@app.post("/agent-reject")
+def agent_reject(data: dict):
     try:
-        data = request.get_json()
         agent_id = (data.get("agentId") or "").strip()
         if not agent_id:
-            return jsonify({"ok": False, "msg": "缺少 agentId"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "缺少 agentId"})
 
-        agents = load_agents_state()
+        agents = _load_agents_state()
         target = next((a for a in agents if a.get("agentId") == agent_id and not a.get("isMain")), None)
         if not target:
-            return jsonify({"ok": False, "msg": "未找到 agent"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "未找到 agent"})
 
         target["authStatus"] = "rejected"
         target["authRejectedAt"] = datetime.now().isoformat()
 
-        # Optionally free join key back to unused
         join_key = target.get("joinKey")
-        keys_data = load_join_keys()
+        keys_data = _load_join_keys()
         if join_key:
             key_item = next((k for k in keys_data.get("keys", []) if k.get("key") == join_key), None)
             if key_item:
@@ -952,65 +1004,52 @@ def agent_reject():
                 key_item["usedByAgentId"] = None
                 key_item["usedAt"] = None
 
-        # Remove from agents list
         agents = [a for a in agents if a.get("agentId") != agent_id or a.get("isMain")]
-
-        save_agents_state(agents)
-        save_join_keys(keys_data)
-        return jsonify({"ok": True, "agentId": agent_id, "authStatus": "rejected"})
+        _save_agents_state(agents)
+        _save_join_keys(keys_data)
+        return {"ok": True, "agentId": agent_id, "authStatus": "rejected"}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/join-agent", methods=["POST"])
-def join_agent():
-    """Add a new agent with one-time join key validation and pending auth"""
+@app.post("/join-agent")
+def join_agent(data: dict):
     try:
-        data = request.get_json()
         if not isinstance(data, dict) or not data.get("name"):
-            return jsonify({"ok": False, "msg": "请提供名字"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "请提供名字"})
 
         name = data["name"].strip()
         state = data.get("state", "idle")
         detail = data.get("detail", "")
         join_key = data.get("joinKey", "").strip()
 
-        # Normalize state early for compatibility
         state = normalize_agent_state(state)
 
         if not join_key:
-            return jsonify({"ok": False, "msg": "请提供接入密钥"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "请提供接入密钥"})
 
-        keys_data = load_join_keys()
+        keys_data = _load_join_keys()
         key_item = next((k for k in keys_data.get("keys", []) if k.get("key") == join_key), None)
         if not key_item:
-            return jsonify({"ok": False, "msg": "接入密钥无效"}), 403
-        # key 可复用：不再因为 used=true 拒绝
+            return JSONResponse(status_code=403, content={"ok": False, "msg": "接入密钥无效"})
 
         with join_lock:
-            # 在锁内重新读取，避免并发请求都基于同一旧快照通过校验
-            keys_data = load_join_keys()
+            keys_data = _load_join_keys()
             key_item = next((k for k in keys_data.get("keys", []) if k.get("key") == join_key), None)
             if not key_item:
-                return jsonify({"ok": False, "msg": "接入密钥无效"}), 403
+                return JSONResponse(status_code=403, content={"ok": False, "msg": "接入密钥无效"})
 
-            # Key-level expiration check
             key_expires_at_str = key_item.get("expiresAt")
             if key_expires_at_str:
                 try:
                     key_expires_at = datetime.fromisoformat(key_expires_at_str)
                     if datetime.now() > key_expires_at:
-                        return jsonify({"ok": False, "msg": "该接入密钥已过期，活动已结束 🎉"}), 403
+                        return JSONResponse(status_code=403, content={"ok": False, "msg": "该接入密钥已过期，活动已结束 🎉"})
                 except Exception:
                     pass
 
-            agents = load_agents_state()
-
-            # 并发上限：同一个 key “同时在线”最多 3 个。
-            # 在线判定：lastPushAt/updated_at 在 5 分钟内；否则视为 offline，不计入并发。
+            agents = _load_agents_state()
             now = datetime.now()
-            existing = next((a for a in agents if a.get("name") == name and not a.get("isMain")), None)
-            existing_id = existing.get("agentId") if existing else None
 
             def _age_seconds(dt_str):
                 if not dt_str:
@@ -1021,7 +1060,9 @@ def join_agent():
                 except Exception:
                     return None
 
-            # opportunistic offline marking
+            existing = next((a for a in agents if a.get("name") == name and not a.get("isMain")), None)
+            existing_id = existing.get("agentId") if existing else None
+
             for a in agents:
                 if a.get("isMain"):
                     continue
@@ -1051,8 +1092,10 @@ def join_agent():
                     active_count += 1
 
             if active_count >= max_concurrent:
-                save_agents_state(agents)
-                return jsonify({"ok": False, "msg": f"该接入密钥当前并发已达上限（{max_concurrent}），请稍后或换另一个 key"}), 429
+                _save_agents_state(agents)
+                return JSONResponse(status_code=429, content={"ok": False, "msg": f"该接入密钥当前并发已达上限（{max_concurrent}），请稍后或换另一个 key"})
+
+            import string as _string
 
             if existing:
                 existing["state"] = state
@@ -1064,16 +1107,12 @@ def join_agent():
                 existing["authStatus"] = "approved"
                 existing["authApprovedAt"] = datetime.now().isoformat()
                 existing["authExpiresAt"] = (datetime.now() + timedelta(hours=24)).isoformat()
-                existing["lastPushAt"] = datetime.now().isoformat()  # join 视为上线，纳入并发/离线判定
+                existing["lastPushAt"] = datetime.now().isoformat()
                 if not existing.get("avatar"):
-                    import random
                     existing["avatar"] = random.choice(["guest_role_1", "guest_role_2", "guest_role_3", "guest_role_4", "guest_role_5", "guest_role_6"])
                 agent_id = existing.get("agentId")
             else:
-                # Use ms + random suffix to avoid collisions under concurrent joins
-                import random
-                import string
-                agent_id = "agent_" + str(int(datetime.now().timestamp() * 1000)) + "_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
+                agent_id = "agent_" + str(int(datetime.now().timestamp() * 1000)) + "_" + "".join(random.choices(_string.ascii_lowercase + _string.digits, k=4))
                 agents.append({
                     "agentId": agent_id,
                     "name": name,
@@ -1088,7 +1127,7 @@ def join_agent():
                     "authApprovedAt": datetime.now().isoformat(),
                     "authExpiresAt": (datetime.now() + timedelta(hours=24)).isoformat(),
                     "lastPushAt": datetime.now().isoformat(),
-                    "avatar": random.choice(["guest_role_1", "guest_role_2", "guest_role_3", "guest_role_4", "guest_role_5", "guest_role_6"])
+                    "avatar": random.choice(["guest_role_1", "guest_role_2", "guest_role_3", "guest_role_4", "guest_role_5", "guest_role_6"]),
                 })
 
             key_item["used"] = True
@@ -1097,49 +1136,39 @@ def join_agent():
             key_item["usedAt"] = datetime.now().isoformat()
             key_item["reusable"] = True
 
-            # 拿到有效 key 直接批准，不再等待主人手动点击
-            # （状态已在上面 existing/new 分支写入）
-            save_agents_state(agents)
-            save_join_keys(keys_data)
+            _save_agents_state(agents)
+            _save_join_keys(keys_data)
 
-        return jsonify({"ok": True, "agentId": agent_id, "authStatus": "approved", "nextStep": "已自动批准，立即开始推送状态"})
+        return {"ok": True, "agentId": agent_id, "authStatus": "approved", "nextStep": "已自动批准，立即开始推送状态"}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/leave-agent", methods=["POST"])
-def leave_agent():
-    """Remove an agent and free its one-time join key for reuse (optional)
-
-    Prefer agentId (stable). Name is accepted for backward compatibility.
-    """
+@app.post("/leave-agent")
+def leave_agent(data: dict):
     try:
-        data = request.get_json()
         if not isinstance(data, dict):
-            return jsonify({"ok": False, "msg": "invalid json"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "invalid json"})
 
         agent_id = (data.get("agentId") or "").strip()
         name = (data.get("name") or "").strip()
         if not agent_id and not name:
-            return jsonify({"ok": False, "msg": "请提供 agentId 或名字"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "请提供 agentId 或名字"})
 
-        agents = load_agents_state()
-
+        agents = _load_agents_state()
         target = None
         if agent_id:
             target = next((a for a in agents if a.get("agentId") == agent_id and not a.get("isMain")), None)
         if (not target) and name:
-            # fallback: remove by name only if agentId not provided
             target = next((a for a in agents if a.get("name") == name and not a.get("isMain")), None)
 
         if not target:
-            return jsonify({"ok": False, "msg": "没有找到要离开的 agent"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "没有找到要离开的 agent"})
 
         join_key = target.get("joinKey")
         new_agents = [a for a in agents if a.get("isMain") or a.get("agentId") != target.get("agentId")]
 
-        # Optional: free key back to unused after leave
-        keys_data = load_join_keys()
+        keys_data = _load_join_keys()
         if join_key:
             key_item = next((k for k in keys_data.get("keys", []) if k.get("key") == join_key), None)
             if key_item:
@@ -1148,39 +1177,30 @@ def leave_agent():
                 key_item["usedByAgentId"] = None
                 key_item["usedAt"] = None
 
-        save_agents_state(new_agents)
-        save_join_keys(keys_data)
-        return jsonify({"ok": True})
+        _save_agents_state(new_agents)
+        _save_join_keys(keys_data)
+        return {"ok": True}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/status", methods=["GET"])
+# ═══════════════════════════════════════════════════════════
+#  Routes — State
+# ═══════════════════════════════════════════════════════════
+@app.get("/status")
 def get_status():
-    """Get current main state (backward compatibility). Optionally include officeName from IDENTITY.md."""
-    state = load_state()
+    state = _load_state()
     office_name = get_office_name_from_identity()
     if office_name:
         state["officeName"] = office_name
-    return jsonify(state)
+    return state
 
 
-@app.route("/agent-push", methods=["POST"])
-def agent_push():
-    """Remote openclaw actively pushes status to office.
-
-    Required fields:
-    - agentId
-    - joinKey
-    - state
-    Optional:
-    - detail
-    - name
-    """
+@app.post("/agent-push")
+def agent_push(data: dict):
     try:
-        data = request.get_json()
         if not isinstance(data, dict):
-            return jsonify({"ok": False, "msg": "invalid json"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "invalid json"})
 
         agent_id = (data.get("agentId") or "").strip()
         join_key = (data.get("joinKey") or "").strip()
@@ -1189,44 +1209,39 @@ def agent_push():
         name = (data.get("name") or "").strip()
 
         if not agent_id or not join_key or not state:
-            return jsonify({"ok": False, "msg": "缺少 agentId/joinKey/state"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "缺少 agentId/joinKey/state"})
 
         state = normalize_agent_state(state)
 
-        keys_data = load_join_keys()
+        keys_data = _load_join_keys()
         key_item = next((k for k in keys_data.get("keys", []) if k.get("key") == join_key), None)
         if not key_item:
-            return jsonify({"ok": False, "msg": "joinKey 无效"}), 403
+            return JSONResponse(status_code=403, content={"ok": False, "msg": "joinKey 无效"})
 
-        # Key-level expiration check
         key_expires_at_str = key_item.get("expiresAt")
         if key_expires_at_str:
             try:
                 key_expires_at = datetime.fromisoformat(key_expires_at_str)
                 if datetime.now() > key_expires_at:
-                    return jsonify({"ok": False, "msg": "该接入密钥已过期，活动已结束 🎉"}), 403
+                    return JSONResponse(status_code=403, content={"ok": False, "msg": "该接入密钥已过期，活动已结束 🎉"})
             except Exception:
                 pass
 
-
-        agents = load_agents_state()
+        agents = _load_agents_state()
         target = next((a for a in agents if a.get("agentId") == agent_id and not a.get("isMain")), None)
         if not target:
-            return jsonify({"ok": False, "msg": "agent 未注册，请先 join"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "agent 未注册，请先 join"})
 
-        # Auth check: only approved agents can push.
-        # Note: "offline" is a presence state (stale), not a revoked authorization.
-        # Allow offline agents to resume pushing and auto-promote them back to approved.
         auth_status = target.get("authStatus", "pending")
         if auth_status not in {"approved", "offline"}:
-            return jsonify({"ok": False, "msg": "agent 未获授权，请等待主人批准"}), 403
+            return JSONResponse(status_code=403, content={"ok": False, "msg": "agent 未获授权，请等待主人批准"})
         if auth_status == "offline":
             target["authStatus"] = "approved"
             target["authApprovedAt"] = datetime.now().isoformat()
             target["authExpiresAt"] = (datetime.now() + timedelta(hours=24)).isoformat()
 
         if target.get("joinKey") != join_key:
-            return jsonify({"ok": False, "msg": "joinKey 不匹配"}), 403
+            return JSONResponse(status_code=403, content={"ok": False, "msg": "joinKey 不匹配"})
 
         target["state"] = state
         target["detail"] = detail
@@ -1240,75 +1255,101 @@ def agent_push():
         target["source"] = "remote-openclaw"
         target["lastPushAt"] = datetime.now().isoformat()
 
-        save_agents_state(agents)
-        return jsonify({"ok": True, "agentId": agent_id, "area": target.get("area")})
+        _save_agents_state(agents)
+        return {"ok": True, "agentId": agent_id, "area": target.get("area")}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/set-agent-avatar", methods=["POST"])
-def set_agent_avatar():
-    """Set a custom avatar sprite for an agent.
-    
-    Accepts:
-    - agentId (required): the agent's ID
-    - avatar (required): sprite key, e.g. "guest_role_3" or "petdex:boba"
-    """
+@app.post("/set-agent-avatar")
+def set_agent_avatar(data: dict):
     try:
-        data = request.get_json()
         if not isinstance(data, dict):
-            return jsonify({"ok": False, "msg": "invalid json"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "invalid json"})
 
         agent_id = (data.get("agentId") or "").strip()
         avatar = (data.get("avatar") or "").strip()
 
         if not agent_id:
-            return jsonify({"ok": False, "msg": "缺少 agentId"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "缺少 agentId"})
         if not avatar:
-            return jsonify({"ok": False, "msg": "缺少 avatar"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "缺少 avatar"})
 
-        agents = load_agents_state()
+        agents = _load_agents_state()
         target = next((a for a in agents if a.get("agentId") == agent_id), None)
         if not target:
-            return jsonify({"ok": False, "msg": "agent 未找到"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "agent 未找到"})
 
         target["avatar"] = avatar
         target["updated_at"] = datetime.now().isoformat()
-        save_agents_state(agents)
+        _save_agents_state(agents)
 
-        return jsonify({
-            "ok": True,
-            "agentId": agent_id,
-            "name": target.get("name", ""),
-            "avatar": avatar
-        })
+        return {"ok": True, "agentId": agent_id, "name": target.get("name", ""), "avatar": avatar}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/health", methods=["GET"])
+@app.post("/set_state")
+def set_state_endpoint(data: dict):
+    try:
+        if not isinstance(data, dict):
+            return JSONResponse(status_code=400, content={"status": "error", "msg": "invalid json"})
+        state = _load_state()
+        if "state" in data:
+            s = data["state"]
+            if s in VALID_AGENT_STATES:
+                state["state"] = s
+        if "detail" in data:
+            state["detail"] = data["detail"]
+        state["updated_at"] = datetime.now().isoformat()
+        _save_state(state)
+        return {"status": "ok"}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"status": "error", "msg": str(e)})
+
+
+# ═══════════════════════════════════════════════════════════
+#  Routes — Health / Metrics / Bot States
+# ═══════════════════════════════════════════════════════════
+
+def _build_yi_ai_status() -> dict:
+    """Report collector cache freshness (not blind HTTP health scan).
+
+    Previously checked YiAi /health/live (bypasses auth → false positive).
+    Now reports: are roles cached? how many? when was last fetch?
+    """
+    try:
+        roles = _get_cached_roles()
+        return {
+            "available": len(roles) > 0,
+            "roles_cached": len(roles),
+            "source": "collector-cache",
+        }
+    except Exception:
+        return {"available": False, "roles_cached": 0, "source": "error"}
+
+
+@app.get("/health")
 def health():
-    """Health check — returns uptime, bridge connectivity, and bot count."""
     uptime = time.time() - START_TIME
-    # Check bridge health: bridge-state.json should be updated every 3s
     bridge_ok = False
-    bridge_age = 0
+    bridge_age = 0.0
     bridge_file = os.path.join(ROOT_DIR, "bridge-state.json")
     if os.path.exists(bridge_file):
         try:
             bridge_age = time.time() - os.path.getmtime(bridge_file)
-            bridge_ok = bridge_age < 30  # bridge pushes every 3s
+            bridge_ok = bridge_age < 30
         except OSError:
             pass
 
     bot_count = 0
     try:
-        agents = load_agents_state()
+        agents = _load_agents_state()
         bot_count = len(agents)
     except Exception:
         pass
 
-    return jsonify({
+    return {
         "status": "ok",
         "service": "star-office-ui",
         "uptime_seconds": round(uptime, 1),
@@ -1318,6 +1359,7 @@ def health():
             "last_seen_sec": round(bridge_age, 1) if bridge_age else None,
         },
         "bot_count": bot_count,
+        "yi_ai": _build_yi_ai_status(),
         "frontend": {
             "fps": client_metrics.get("fps", 0),
             "memory_mb": {
@@ -1327,16 +1369,15 @@ def health():
             },
             "last_report_sec": round(time.time() - client_metrics.get("last_report_at", 0), 1) if client_metrics.get("last_report_at") else None,
         },
+        "storage": "redis" if redis_enabled() else "json-files",
         "timestamp": datetime.now().isoformat(),
-    })
+    }
 
 
-@app.route("/client-metrics", methods=["POST"])
-def client_metrics_route():
-    """Receive FPS and memory metrics from the Phaser frontend."""
+@app.post("/client-metrics")
+def client_metrics_route(data: dict):
     global client_metrics
     try:
-        data = request.get_json(force=True, silent=True) or {}
         client_metrics["fps"] = data.get("fps", 0)
         client_metrics["usedJSHeapSize"] = data.get("usedJSHeapSize", 0)
         client_metrics["totalJSHeapSize"] = data.get("totalJSHeapSize", 0)
@@ -1344,15 +1385,13 @@ def client_metrics_route():
         client_metrics["last_report_at"] = time.time()
     except Exception:
         pass
-    return jsonify({"ok": True})
+    return {"ok": True}
 
 
-@app.route("/ds-bot-states", methods=["GET"])
+@app.get("/ds-bot-states")
 def ds_bot_states():
-    """返回所有 DSH Bot 的实时状态，供 YiVad 角色页轮询"""
     try:
-        agents = load_agents_state()
-        # 尝试读取 bridge 共享的状态快照
+        agents = _load_agents_state()
         bridge_states = {}
         bridge_file = os.path.join(ROOT_DIR, "bridge-state.json")
         if os.path.exists(bridge_file):
@@ -1369,49 +1408,27 @@ def ds_bot_states():
             state = a.get("state", "idle")
             detail = a.get("detail", "")
             updated = a.get("updated_at", now_iso)
-            # bridge 数据优先（更实时）
             if name in bridge_states:
                 state = bridge_states[name].get("state", state)
                 detail = bridge_states[name].get("detail", detail)
+            bots[name] = {"state": state, "detail": detail, "updatedAt": updated}
 
-            bots[name] = {
-                "state": state,
-                "detail": detail,
-                "updatedAt": updated,
-            }
-
-        return jsonify({
-            "bots": bots,
-            "count": len(bots),
-            "updated_at": now_iso,
-        })
+        return {"bots": bots, "count": len(bots), "updated_at": now_iso}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/office/floor/<int:n>", methods=["GET"])
-def office_floor(n):
-    """返回指定楼层的 bot 状态
-    
-    楼层分配:
-      1F: 管理决策层 — Chief, 管理顾问, 技术负责人, 产品经理, Readme管家
-      2F: 工程执行层 — 软件工程师, AI工程师, SRE工程师, Git管家, UB模式, Vue3专家
-      3F: 创意内容层 — Remotion大师, 排版管家, 设计品味, 知识管理者, 像素办公室
-    """
-    floor_map = {
-        1: ["Chief", "管理顾问", "技术负责人", "产品经理", "Readme管家"],
-        2: ["软件工程师", "AI工程师", "SRE工程师", "Git管家", "UB模式", "Vue3专家"],
-        3: ["Remotion大师", "排版管家", "设计品味", "知识管理者", "像素办公室"],
-    }
-    if n not in floor_map:
-        return jsonify({"ok": False, "msg": f"楼层 {n} 不存在 (1-3)"}), 404
-
+@app.get("/office/floor/{n}")
+def office_floor(n: int):
+    floor_map = _load_floor_registry()
     floor_names = {1: "管理决策层", 2: "工程执行层", 3: "创意内容层"}
+
+    if n not in floor_map:
+        return JSONResponse(status_code=404, content={"ok": False, "msg": f"楼层 {n} 不存在 (1-3)"})
+
     floor_bots = floor_map[n]
-    
     try:
-        agents = load_agents_state()
-        # bridge 数据优先
+        agents = _load_agents_state()
         bridge_states = {}
         bridge_file = os.path.join(ROOT_DIR, "bridge-state.json")
         if os.path.exists(bridge_file):
@@ -1436,142 +1453,98 @@ def office_floor(n):
             bots[name] = {"state": state, "detail": detail, "updatedAt": updated}
 
         active = sum(1 for b in bots.values() if b["state"] != "idle")
-        return jsonify({
-            "floor": n,
-            "name": floor_names[n],
-            "bots": bots,
-            "count": len(bots),
-            "active": active,
-            "updated_at": now_iso,
-        })
+        return {"floor": n, "name": floor_names[n], "bots": bots, "count": len(bots), "active": active, "updated_at": now_iso}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/yesterday-memo", methods=["GET"])
+@app.get("/yesterday-memo")
 def get_yesterday_memo():
-    """获取昨日小日记"""
     try:
-        # 先尝试找昨天的文件
         yesterday_str = get_yesterday_date_str()
         yesterday_file = os.path.join(MEMORY_DIR, f"{yesterday_str}.md")
-        
         target_file = None
         target_date = yesterday_str
-        
+
         if os.path.exists(yesterday_file):
             target_file = yesterday_file
         else:
-            # 如果昨天没有，找最近的一天
             if os.path.exists(MEMORY_DIR):
                 files = [f for f in os.listdir(MEMORY_DIR) if f.endswith(".md") and re.match(r"\d{4}-\d{2}-\d{2}\.md", f)]
                 if files:
                     files.sort(reverse=True)
-                    # 跳过今天的（如果存在）
                     today_str = datetime.now().strftime("%Y-%m-%d")
                     for f in files:
                         if f != f"{today_str}.md":
                             target_file = os.path.join(MEMORY_DIR, f)
                             target_date = f.replace(".md", "")
                             break
-        
+
         if target_file and os.path.exists(target_file):
             memo_content = extract_memo_from_file(target_file)
-            return jsonify({
-                "success": True,
-                "date": target_date,
-                "memo": memo_content
-            })
+            return {"success": True, "date": target_date, "memo": memo_content}
         else:
-            return jsonify({
-                "success": False,
-                "msg": "没有找到昨日日记"
-            })
+            return {"success": False, "msg": "没有找到昨日日记"}
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "msg": str(e)
-        }), 500
+        return JSONResponse(status_code=500, content={"success": False, "msg": str(e)})
 
 
-@app.route("/set_state", methods=["POST"])
-def set_state_endpoint():
-    """Set state via POST (for UI control panel)"""
-    try:
-        data = request.get_json()
-        if not isinstance(data, dict):
-            return jsonify({"status": "error", "msg": "invalid json"}), 400
-        state = load_state()
-        if "state" in data:
-            s = data["state"]
-            if s in VALID_AGENT_STATES:
-                state["state"] = s
-        if "detail" in data:
-            state["detail"] = data["detail"]
-        state["updated_at"] = datetime.now().isoformat()
-        save_state(state)
-        return jsonify({"status": "ok"})
-    except Exception as e:
-        return jsonify({"status": "error", "msg": str(e)}), 500
-
-
-@app.route("/assets/template.zip", methods=["GET"])
+# ═══════════════════════════════════════════════════════════
+#  Routes — Assets
+# ═══════════════════════════════════════════════════════════
+@app.get("/assets/template.zip")
 def assets_template_download():
     if not os.path.exists(ASSET_TEMPLATE_ZIP):
-        return jsonify({"ok": False, "msg": "模板包不存在，请先生成"}), 404
-    return send_from_directory(ROOT_DIR, "assets-replace-template.zip", as_attachment=True)
+        return JSONResponse(status_code=404, content={"ok": False, "msg": "模板包不存在，请先生成"})
+    return FileResponse(ASSET_TEMPLATE_ZIP, filename="assets-replace-template.zip")
 
 
-@app.route("/assets/list", methods=["GET"])
+@app.get("/assets/list")
 def assets_list():
     items = []
-    for p in FRONTEND_PATH.rglob("*"):
-        if not p.is_file():
-            continue
-        rel = p.relative_to(FRONTEND_PATH).as_posix()
-        if rel.startswith("fonts/"):
-            continue
-        if p.suffix.lower() not in ASSET_ALLOWED_EXTS:
-            continue
-        st = p.stat()
-        width = None
-        height = None
-        if Image is not None:
-            try:
-                with Image.open(p) as im:
-                    width, height = im.size
-            except Exception:
-                pass
-        items.append({
-            "path": rel,
-            "size": st.st_size,
-            "ext": p.suffix.lower(),
-            "width": width,
-            "height": height,
-            "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(),
-        })
+    seen = set()
+    # Scan dist/ first (production build), then source
+    for scan_root in _STATIC_ROOTS:
+        for p in Path(scan_root).rglob("*"):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(scan_root).as_posix()
+            if rel in seen:
+                continue
+            seen.add(rel)
+            if rel.startswith("fonts/"):
+                continue
+            if p.suffix.lower() not in ASSET_ALLOWED_EXTS:
+                continue
+            st = p.stat()
+            width = None
+            height = None
+            if Image is not None:
+                try:
+                    with Image.open(p) as im:
+                        width, height = im.size
+                except Exception:
+                    pass
+            items.append({
+                "path": rel,
+                "size": st.st_size,
+                "ext": p.suffix.lower(),
+                "width": width,
+                "height": height,
+                "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(),
+            })
     items.sort(key=lambda x: x["path"])
-    return jsonify({"ok": True, "count": len(items), "items": items})
+    return {"ok": True, "count": len(items), "items": items}
 
 
 def _bg_generate_worker(task_id: str, custom_prompt: str, speed_mode: str):
-    """Background worker for RPG background generation."""
     try:
         target = FRONTEND_PATH / "office_bg_small.webp"
-
-        # 覆盖前保留最近一次备份
         bak = target.with_suffix(target.suffix + ".bak")
         shutil.copy2(target, bak)
 
-        _generate_rpg_background_to_webp(
-            str(target),
-            width=1280,
-            height=720,
-            custom_prompt=custom_prompt,
-            speed_mode=speed_mode,
-        )
+        _generate_rpg_background_to_webp(str(target), width=1280, height=720, custom_prompt=custom_prompt, speed_mode=speed_mode)
 
-        # 每次生成都归档一份历史底图（可回溯风格演化）
         os.makedirs(BG_HISTORY_DIR, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         hist_file = os.path.join(BG_HISTORY_DIR, f"office_bg_small-{ts}.webp")
@@ -1608,38 +1581,33 @@ def _bg_generate_worker(task_id: str, custom_prompt: str, speed_mode: str):
             _bg_tasks[task_id] = {"status": "error", "result": error_result}
 
 
-@app.route("/assets/generate-rpg-background", methods=["POST"])
-def assets_generate_rpg_background():
-    """Start async RPG background generation. Returns a task_id for polling."""
-    guard = _require_asset_editor_auth()
+@app.post("/assets/generate-rpg-background")
+def assets_generate_rpg_background(request: Request, data: dict = {}):
+    guard = _require_asset_editor_auth(request)
     if guard:
         return guard
     try:
-        req = request.get_json(silent=True) or {}
-        custom_prompt = (req.get("prompt") or "").strip() if isinstance(req, dict) else ""
-        speed_mode = (req.get("speed_mode") or "quality").strip().lower() if isinstance(req, dict) else "quality"
+        custom_prompt = (data.get("prompt") or "").strip() if isinstance(data, dict) else ""
+        speed_mode = (data.get("speed_mode") or "quality").strip().lower() if isinstance(data, dict) else "quality"
         if speed_mode not in {"fast", "quality"}:
             speed_mode = "fast"
 
         target = FRONTEND_PATH / "office_bg_small.webp"
         if not target.exists():
-            return jsonify({"ok": False, "msg": "office_bg_small.webp 不存在"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "office_bg_small.webp 不存在"})
 
-        # Pre-flight checks that can fail fast (before spawning thread)
-        runtime_cfg = load_runtime_config()
+        runtime_cfg = _load_runtime_config()
         api_key = (runtime_cfg.get("gemini_api_key") or "").strip()
         if not api_key:
-            return jsonify({"ok": False, "code": "MISSING_API_KEY", "msg": "Missing GEMINI_API_KEY or GOOGLE_API_KEY"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "code": "MISSING_API_KEY", "msg": "Missing GEMINI_API_KEY or GOOGLE_API_KEY"})
         if not (os.path.exists(GEMINI_PYTHON) and os.path.exists(GEMINI_SCRIPT)):
-            return jsonify({"ok": False, "msg": "生图脚本环境缺失：gemini-image-generate 未安装"}), 500
+            return JSONResponse(status_code=500, content={"ok": False, "msg": "生图脚本环境缺失：gemini-image-generate 未安装"})
 
-        # Check if another generation is already running
         with _bg_tasks_lock:
             for tid, task in _bg_tasks.items():
                 if task.get("status") == "pending":
-                    return jsonify({"ok": True, "async": True, "task_id": tid, "msg": "已有生图任务进行中，请等待完成"}), 200
+                    return {"ok": True, "async": True, "task_id": tid, "msg": "已有生图任务进行中，请等待完成"}
 
-        # Create async task
         import string as _string
         task_id = "gen_" + str(int(datetime.now().timestamp() * 1000)) + "_" + "".join(random.choices(_string.ascii_lowercase + _string.digits, k=4))
         with _bg_tasks_lock:
@@ -1648,58 +1616,52 @@ def assets_generate_rpg_background():
         t = threading.Thread(target=_bg_generate_worker, args=(task_id, custom_prompt, speed_mode), daemon=True)
         t.start()
 
-        return jsonify({"ok": True, "async": True, "task_id": task_id, "msg": "生图任务已启动，请通过 task_id 轮询结果"})
+        return {"ok": True, "async": True, "task_id": task_id, "msg": "生图任务已启动，请通过 task_id 轮询结果"}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/assets/generate-rpg-background/poll", methods=["GET"])
-def assets_generate_rpg_background_poll():
-    """Poll async generation task status."""
-    guard = _require_asset_editor_auth()
+@app.get("/assets/generate-rpg-background/poll")
+def assets_generate_rpg_background_poll(request: Request, task_id: str = Query(...)):
+    guard = _require_asset_editor_auth(request)
     if guard:
         return guard
-    task_id = (request.args.get("task_id") or "").strip()
     if not task_id:
-        return jsonify({"ok": False, "msg": "缺少 task_id"}), 400
+        return JSONResponse(status_code=400, content={"ok": False, "msg": "缺少 task_id"})
     with _bg_tasks_lock:
         task = _bg_tasks.get(task_id)
     if not task:
-        return jsonify({"ok": False, "msg": "任务不存在"}), 404
+        return JSONResponse(status_code=404, content={"ok": False, "msg": "任务不存在"})
     status = task.get("status", "pending")
     if status == "pending":
-        return jsonify({"ok": True, "status": "pending", "msg": "生图进行中..."})
+        return {"ok": True, "status": "pending", "msg": "生图进行中..."}
     elif status == "done":
-        # Clean up task after delivering result
         with _bg_tasks_lock:
             _bg_tasks.pop(task_id, None)
-        return jsonify({"ok": True, "status": "done", **task.get("result", {})})
+        return {"ok": True, "status": "done", **task.get("result", {})}
     else:
         with _bg_tasks_lock:
             _bg_tasks.pop(task_id, None)
         result = task.get("result", {})
         code = 400 if result.get("code") else 500
-        return jsonify({"ok": False, "status": "error", **result}), code
+        return JSONResponse(status_code=code, content={"ok": False, "status": "error", **result})
 
 
-@app.route("/assets/restore-reference-background", methods=["POST"])
-def assets_restore_reference_background():
-    """Restore office_bg_small.webp from fixed reference image."""
-    guard = _require_asset_editor_auth()
+@app.post("/assets/restore-reference-background")
+def assets_restore_reference_background(request: Request):
+    guard = _require_asset_editor_auth(request)
     if guard:
         return guard
     try:
         target = FRONTEND_PATH / "office_bg_small.webp"
         if not target.exists():
-            return jsonify({"ok": False, "msg": "office_bg_small.webp 不存在"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "office_bg_small.webp 不存在"})
         if not os.path.exists(ROOM_REFERENCE_IMAGE):
-            return jsonify({"ok": False, "msg": "参考图不存在"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "参考图不存在"})
 
-        # 备份当前底图
         bak = target.with_suffix(target.suffix + ".bak")
         shutil.copy2(target, bak)
 
-        # 快速路径：若参考图已是 1280x720 的 webp，直接拷贝（秒级）
         ref_ext = os.path.splitext(ROOM_REFERENCE_IMAGE)[1].lower()
         fast_copied = False
         if ref_ext == '.webp':
@@ -1711,38 +1673,31 @@ def assets_restore_reference_background():
             except Exception:
                 fast_copied = False
 
-        # 慢路径：仅在必要时重编码
         if not fast_copied:
             if Image is None:
-                return jsonify({"ok": False, "msg": "Pillow 不可用"}), 500
+                return JSONResponse(status_code=500, content={"ok": False, "msg": "Pillow 不可用"})
             with Image.open(ROOM_REFERENCE_IMAGE) as im:
                 im = im.convert("RGBA").resize((1280, 720), Image.Resampling.LANCZOS)
                 im.save(target, "WEBP", quality=92, method=6)
 
         st = target.stat()
-        return jsonify({
-            "ok": True,
-            "path": "office_bg_small.webp",
-            "size": st.st_size,
-            "msg": "已恢复初始底图",
-        })
+        return {"ok": True, "path": "office_bg_small.webp", "size": st.st_size, "msg": "已恢复初始底图"}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/assets/restore-last-generated-background", methods=["POST"])
-def assets_restore_last_generated_background():
-    """Restore office_bg_small.webp from latest bg-history snapshot."""
-    guard = _require_asset_editor_auth()
+@app.post("/assets/restore-last-generated-background")
+def assets_restore_last_generated_background(request: Request):
+    guard = _require_asset_editor_auth(request)
     if guard:
         return guard
     try:
         target = FRONTEND_PATH / "office_bg_small.webp"
         if not target.exists():
-            return jsonify({"ok": False, "msg": "office_bg_small.webp 不存在"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "office_bg_small.webp 不存在"})
 
         if not os.path.isdir(BG_HISTORY_DIR):
-            return jsonify({"ok": False, "msg": "暂无历史底图"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "暂无历史底图"})
 
         files = [
             os.path.join(BG_HISTORY_DIR, x)
@@ -1750,29 +1705,25 @@ def assets_restore_last_generated_background():
             if x.startswith("office_bg_small-") and x.endswith(".webp")
         ]
         if not files:
-            return jsonify({"ok": False, "msg": "暂无历史底图"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "暂无历史底图"})
 
         latest = max(files, key=lambda p: os.path.getmtime(p))
-
         bak = target.with_suffix(target.suffix + ".bak")
         shutil.copy2(target, bak)
         shutil.copy2(latest, target)
 
         st = target.stat()
-        return jsonify({
-            "ok": True,
-            "path": "office_bg_small.webp",
-            "size": st.st_size,
-            "from": os.path.relpath(latest, ROOT_DIR),
-            "msg": "已回退到最近一次生成底图",
-        })
+        return {"ok": True, "path": "office_bg_small.webp", "size": st.st_size, "from": os.path.relpath(latest, ROOT_DIR), "msg": "已回退到最近一次生成底图"}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/assets/home-favorites/list", methods=["GET"])
-def assets_home_favorites_list():
-    guard = _require_asset_editor_auth()
+# ═══════════════════════════════════════════════════════════
+#  Routes — Home Favorites
+# ═══════════════════════════════════════════════════════════
+@app.get("/assets/home-favorites/list")
+def assets_home_favorites_list(request: Request):
+    guard = _require_asset_editor_auth(request)
     if guard:
         return guard
     try:
@@ -1795,28 +1746,28 @@ def assets_home_favorites_list():
                 "created_at": it.get("created_at") or "",
             })
         out.sort(key=lambda x: x.get("created_at") or "", reverse=True)
-        return jsonify({"ok": True, "items": out})
+        return {"ok": True, "items": out}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/assets/home-favorites/file/<path:filename>", methods=["GET"])
-def assets_home_favorites_file(filename):
-    guard = _require_asset_editor_auth()
+@app.get("/assets/home-favorites/file/{filename}")
+def assets_home_favorites_file(request: Request, filename: str):
+    guard = _require_asset_editor_auth(request)
     if guard:
         return guard
-    return send_from_directory(HOME_FAVORITES_DIR, filename)
+    return FileResponse(os.path.join(HOME_FAVORITES_DIR, filename))
 
 
-@app.route("/assets/home-favorites/save-current", methods=["POST"])
-def assets_home_favorites_save_current():
-    guard = _require_asset_editor_auth()
+@app.post("/assets/home-favorites/save-current")
+def assets_home_favorites_save_current(request: Request):
+    guard = _require_asset_editor_auth(request)
     if guard:
         return guard
     try:
         src = FRONTEND_PATH / "office_bg_small.webp"
         if not src.exists():
-            return jsonify({"ok": False, "msg": "office_bg_small.webp 不存在"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "office_bg_small.webp 不存在"})
 
         _ensure_home_favorites_index()
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1827,13 +1778,8 @@ def assets_home_favorites_save_current():
 
         idx = _load_home_favorites_index()
         items = idx.get("items") or []
-        items.insert(0, {
-            "id": item_id,
-            "path": os.path.relpath(dst, ROOT_DIR),
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-        })
+        items.insert(0, {"id": item_id, "path": os.path.relpath(dst, ROOT_DIR), "created_at": datetime.now().isoformat(timespec="seconds")})
 
-        # 控制收藏数量上限，清理最旧项
         if len(items) > HOME_FAVORITES_MAX:
             extra = items[HOME_FAVORITES_MAX:]
             items = items[:HOME_FAVORITES_MAX]
@@ -1847,27 +1793,26 @@ def assets_home_favorites_save_current():
 
         idx["items"] = items
         _save_home_favorites_index(idx)
-        return jsonify({"ok": True, "id": item_id, "path": os.path.relpath(dst, ROOT_DIR), "msg": "已收藏当前地图"})
+        return {"ok": True, "id": item_id, "path": os.path.relpath(dst, ROOT_DIR), "msg": "已收藏当前地图"}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/assets/home-favorites/delete", methods=["POST"])
-def assets_home_favorites_delete():
-    guard = _require_asset_editor_auth()
+@app.post("/assets/home-favorites/delete")
+def assets_home_favorites_delete(request: Request, data: dict):
+    guard = _require_asset_editor_auth(request)
     if guard:
         return guard
     try:
-        data = request.get_json(silent=True) or {}
         item_id = (data.get("id") or "").strip()
         if not item_id:
-            return jsonify({"ok": False, "msg": "缺少 id"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "缺少 id"})
 
         idx = _load_home_favorites_index()
         items = idx.get("items") or []
         hit = next((x for x in items if (x.get("id") or "") == item_id), None)
         if not hit:
-            return jsonify({"ok": False, "msg": "收藏项不存在"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "收藏项不存在"})
 
         rel = hit.get("path") or ""
         abs_path = os.path.join(ROOT_DIR, rel)
@@ -1879,279 +1824,290 @@ def assets_home_favorites_delete():
 
         idx["items"] = [x for x in items if (x.get("id") or "") != item_id]
         _save_home_favorites_index(idx)
-        return jsonify({"ok": True, "id": item_id, "msg": "已删除收藏"})
+        return {"ok": True, "id": item_id, "msg": "已删除收藏"}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/assets/home-favorites/apply", methods=["POST"])
-def assets_home_favorites_apply():
-    guard = _require_asset_editor_auth()
+@app.post("/assets/home-favorites/apply")
+def assets_home_favorites_apply(request: Request, data: dict):
+    guard = _require_asset_editor_auth(request)
     if guard:
         return guard
     try:
-        data = request.get_json(silent=True) or {}
         item_id = (data.get("id") or "").strip()
         if not item_id:
-            return jsonify({"ok": False, "msg": "缺少 id"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "缺少 id"})
 
         idx = _load_home_favorites_index()
         items = idx.get("items") or []
         hit = next((x for x in items if (x.get("id") or "") == item_id), None)
         if not hit:
-            return jsonify({"ok": False, "msg": "收藏项不存在"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "收藏项不存在"})
 
         src = os.path.join(ROOT_DIR, hit.get("path") or "")
         if not os.path.exists(src):
-            return jsonify({"ok": False, "msg": "收藏文件不存在"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "收藏文件不存在"})
 
         target = FRONTEND_PATH / "office_bg_small.webp"
         if not target.exists():
-            return jsonify({"ok": False, "msg": "office_bg_small.webp 不存在"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "office_bg_small.webp 不存在"})
 
         bak = target.with_suffix(target.suffix + ".bak")
         shutil.copy2(str(target), str(bak))
         shutil.copy2(src, str(target))
 
         st = target.stat()
-        return jsonify({"ok": True, "path": "office_bg_small.webp", "size": st.st_size, "from": hit.get("path"), "msg": "已应用收藏地图"})
+        return {"ok": True, "path": "office_bg_small.webp", "size": st.st_size, "from": hit.get("path"), "msg": "已应用收藏地图"}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/assets/auth", methods=["POST"])
-def assets_auth():
+# ═══════════════════════════════════════════════════════════
+#  Routes — Asset Auth
+# ═══════════════════════════════════════════════════════════
+@app.post("/assets/auth")
+def assets_auth(request: Request, data: dict):
     try:
-        data = request.get_json(silent=True) or {}
         pwd = (data.get("password") or "").strip()
         if pwd and pwd == ASSET_DRAWER_PASS_DEFAULT:
-            session["asset_editor_authed"] = True
-            return jsonify({"ok": True, "msg": "认证成功"})
-        return jsonify({"ok": False, "msg": "验证码错误"}), 401
+            request.session["asset_editor_authed"] = True
+            return {"ok": True, "msg": "认证成功"}
+        return JSONResponse(status_code=401, content={"ok": False, "msg": "验证码错误"})
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/assets/auth/status", methods=["GET"])
-def assets_auth_status():
-    return jsonify({
+@app.get("/assets/auth/status")
+def assets_auth_status(request: Request):
+    return {
         "ok": True,
-        "authed": _is_asset_editor_authed(),
+        "authed": _is_asset_editor_authed(request),
         "drawer_default_pass": ASSET_DRAWER_PASS_DEFAULT == "1234",
-    })
+    }
 
 
-@app.route("/assets/positions", methods=["GET"])
-def assets_positions_get():
-    guard = _require_asset_editor_auth()
+# ═══════════════════════════════════════════════════════════
+#  Routes — Asset Positions / Defaults
+# ═══════════════════════════════════════════════════════════
+@app.get("/assets/positions")
+def assets_positions_get(request: Request):
+    guard = _require_asset_editor_auth(request)
     if guard:
         return guard
     try:
-        return jsonify({"ok": True, "items": load_asset_positions()})
+        return {"ok": True, "items": _load_asset_positions()}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/assets/positions", methods=["POST"])
-def assets_positions_set():
-    guard = _require_asset_editor_auth()
+@app.post("/assets/positions")
+def assets_positions_set(request: Request, data: dict):
+    guard = _require_asset_editor_auth(request)
     if guard:
         return guard
     try:
-        data = request.get_json(silent=True) or {}
         key = (data.get("key") or "").strip()
         x = data.get("x")
         y = data.get("y")
         scale = data.get("scale")
         if not key:
-            return jsonify({"ok": False, "msg": "缺少 key"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "缺少 key"})
         if x is None or y is None:
-            return jsonify({"ok": False, "msg": "缺少 x/y"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "缺少 x/y"})
         x = float(x)
         y = float(y)
         if scale is None:
             scale = 1.0
         scale = float(scale)
 
-        all_pos = load_asset_positions()
+        all_pos = _load_asset_positions()
         all_pos[key] = {"x": x, "y": y, "scale": scale, "updated_at": datetime.now().isoformat()}
-        save_asset_positions(all_pos)
-        return jsonify({"ok": True, "key": key, "x": x, "y": y, "scale": scale})
+        _save_asset_positions(all_pos)
+        return {"ok": True, "key": key, "x": x, "y": y, "scale": scale}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/assets/defaults", methods=["GET"])
-def assets_defaults_get():
-    guard = _require_asset_editor_auth()
+@app.get("/assets/defaults")
+def assets_defaults_get(request: Request):
+    guard = _require_asset_editor_auth(request)
     if guard:
         return guard
     try:
-        return jsonify({"ok": True, "items": load_asset_defaults()})
+        return {"ok": True, "items": _load_asset_defaults()}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/assets/defaults", methods=["POST"])
-def assets_defaults_set():
-    guard = _require_asset_editor_auth()
+@app.post("/assets/defaults")
+def assets_defaults_set(request: Request, data: dict):
+    guard = _require_asset_editor_auth(request)
     if guard:
         return guard
     try:
-        data = request.get_json(silent=True) or {}
         key = (data.get("key") or "").strip()
         x = data.get("x")
         y = data.get("y")
         scale = data.get("scale")
         if not key:
-            return jsonify({"ok": False, "msg": "缺少 key"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "缺少 key"})
         if x is None or y is None:
-            return jsonify({"ok": False, "msg": "缺少 x/y"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "缺少 x/y"})
         x = float(x)
         y = float(y)
         if scale is None:
             scale = 1.0
         scale = float(scale)
 
-        all_defaults = load_asset_defaults()
+        all_defaults = _load_asset_defaults()
         all_defaults[key] = {"x": x, "y": y, "scale": scale, "updated_at": datetime.now().isoformat()}
-        save_asset_defaults(all_defaults)
-        return jsonify({"ok": True, "key": key, "x": x, "y": y, "scale": scale})
+        _save_asset_defaults(all_defaults)
+        return {"ok": True, "key": key, "x": x, "y": y, "scale": scale}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/config/gemini", methods=["GET"])
-def gemini_config_get():
-    guard = _require_asset_editor_auth()
+# ═══════════════════════════════════════════════════════════
+#  Routes — Config / Restore
+# ═══════════════════════════════════════════════════════════
+@app.get("/config/gemini")
+def gemini_config_get(request: Request):
+    guard = _require_asset_editor_auth(request)
     if guard:
         return guard
     try:
-        cfg = load_runtime_config()
+        cfg = _load_runtime_config()
         key = (cfg.get("gemini_api_key") or "").strip()
         masked = ("*" * max(0, len(key) - 4)) + key[-4:] if key else ""
-        return jsonify({
+        return {
             "ok": True,
             "has_api_key": bool(key),
             "api_key_masked": masked,
             "gemini_model": _normalize_user_model(cfg.get("gemini_model") or "nanobanana-pro"),
-        })
+        }
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/config/gemini", methods=["POST"])
-def gemini_config_set():
-    guard = _require_asset_editor_auth()
+@app.post("/config/gemini")
+def gemini_config_set(request: Request, data: dict):
+    guard = _require_asset_editor_auth(request)
     if guard:
         return guard
     try:
-        data = request.get_json(silent=True) or {}
         api_key = (data.get("api_key") or "").strip()
         model = _normalize_user_model((data.get("model") or "").strip() or "nanobanana-pro")
         payload = {"gemini_model": model}
         if api_key:
             payload["gemini_api_key"] = api_key
-        save_runtime_config(payload)
-        return jsonify({"ok": True, "msg": "Gemini 配置已保存"})
+        _save_runtime_config(payload)
+        return {"ok": True, "msg": "Gemini 配置已保存"}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/assets/restore-default", methods=["POST"])
-def assets_restore_default():
-    guard = _require_asset_editor_auth()
+@app.post("/assets/restore-default")
+def assets_restore_default(request: Request, data: dict):
+    guard = _require_asset_editor_auth(request)
     if guard:
         return guard
     try:
-        data = request.get_json(silent=True) or {}
         rel_path = (data.get("path") or "").strip().lstrip("/")
         if not rel_path:
-            return jsonify({"ok": False, "msg": "缺少 path"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "缺少 path"})
 
         target = (FRONTEND_PATH / rel_path).resolve()
         try:
             target.relative_to(FRONTEND_PATH.resolve())
         except Exception:
-            return jsonify({"ok": False, "msg": "非法 path"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "非法 path"})
 
         if not target.exists():
-            return jsonify({"ok": False, "msg": "目标文件不存在"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "目标文件不存在"})
 
         root, ext = os.path.splitext(str(target))
         default_path = root + ext + ".default"
         if not os.path.exists(default_path):
-            return jsonify({"ok": False, "msg": "未找到默认资产快照"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "未找到默认资产快照"})
 
-        # 回滚前保留上一版
         bak = str(target) + ".bak"
         if os.path.exists(str(target)):
             shutil.copy2(str(target), bak)
 
         shutil.copy2(default_path, str(target))
         st = os.stat(str(target))
-        return jsonify({"ok": True, "path": rel_path, "size": st.st_size, "msg": "已重置为默认资产"})
+        return {"ok": True, "path": rel_path, "size": st.st_size, "msg": "已重置为默认资产"}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/assets/restore-prev", methods=["POST"])
-def assets_restore_prev():
-    guard = _require_asset_editor_auth()
+@app.post("/assets/restore-prev")
+def assets_restore_prev(request: Request, data: dict):
+    guard = _require_asset_editor_auth(request)
     if guard:
         return guard
     try:
-        data = request.get_json(silent=True) or {}
         rel_path = (data.get("path") or "").strip().lstrip("/")
         if not rel_path:
-            return jsonify({"ok": False, "msg": "缺少 path"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "缺少 path"})
 
         target = (FRONTEND_PATH / rel_path).resolve()
         try:
             target.relative_to(FRONTEND_PATH.resolve())
         except Exception:
-            return jsonify({"ok": False, "msg": "非法 path"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "非法 path"})
 
         bak = str(target) + ".bak"
         if not os.path.exists(bak):
-            return jsonify({"ok": False, "msg": "未找到上一版备份"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "未找到上一版备份"})
 
         shutil.copy2(str(target), bak + ".tmp") if os.path.exists(str(target)) else None
         shutil.copy2(bak, str(target))
         st = os.stat(str(target))
-        return jsonify({"ok": True, "path": rel_path, "size": st.st_size, "msg": "已回退到上一版"})
+        return {"ok": True, "path": rel_path, "size": st.st_size, "msg": "已回退到上一版"}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
-@app.route("/assets/upload", methods=["POST"])
-def assets_upload():
-    guard = _require_asset_editor_auth()
+@app.post("/assets/upload")
+def assets_upload(
+    request: Request,
+    path: str = Form(..., description="Relative path for the target asset"),
+    file: UploadFile = File(..., description="Asset file to upload"),
+    backup: str = Form("1"),
+    auto_spritesheet: str = Form("0"),
+    frame_w: str = Form("0"),
+    frame_h: str = Form("0"),
+    cols: str = Form("0"),
+    rows: str = Form("0"),
+    preserve_original: str = Form("1"),
+    pixel_art: str = Form("1"),
+):
+    guard = _require_asset_editor_auth(request)
     if guard:
         return guard
     try:
-        rel_path = (request.form.get("path") or "").strip().lstrip("/")
-        backup = (request.form.get("backup") or "1").strip() != "0"
-        f = request.files.get("file")
-
-        if not rel_path or f is None:
-            return jsonify({"ok": False, "msg": "缺少 path 或 file"}), 400
+        rel_path = path.lstrip("/")
+        do_backup = backup.strip() != "0"
+        if not rel_path or file is None:
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "缺少 path 或 file"})
 
         target = (FRONTEND_PATH / rel_path).resolve()
         try:
             target.relative_to(FRONTEND_PATH.resolve())
         except Exception:
-            return jsonify({"ok": False, "msg": "非法 path"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "非法 path"})
 
         if target.suffix.lower() not in ASSET_ALLOWED_EXTS:
-            return jsonify({"ok": False, "msg": "仅允许上传图片/美术资源类型"}), 400
+            return JSONResponse(status_code=400, content={"ok": False, "msg": "仅允许上传图片/美术资源类型"})
 
         if not target.exists():
-            return jsonify({"ok": False, "msg": "目标文件不存在，请先从 /assets/list 选择 path"}), 404
+            return JSONResponse(status_code=404, content={"ok": False, "msg": "目标文件不存在，请先从 /assets/list 选择 path"})
 
         target.parent.mkdir(parents=True, exist_ok=True)
 
-        # 首次上传前固化默认资产快照，供“重置为默认资产”使用
+        # Create default snapshot
         default_snap = Path(str(target) + ".default")
         if not default_snap.exists():
             try:
@@ -2159,82 +2115,75 @@ def assets_upload():
             except Exception:
                 pass
 
-        if backup:
+        if do_backup:
             bak = target.with_suffix(target.suffix + ".bak")
             shutil.copy2(target, bak)
 
-        auto_sheet = (request.form.get("auto_spritesheet") or "0").strip() == "1"
-        ext_name = (f.filename or "").lower()
+        auto_sheet = auto_spritesheet.strip() == "1"
+        ext_name = (file.filename or "").lower()
 
         if auto_sheet and target.suffix.lower() in {".webp", ".png"}:
             with tempfile.NamedTemporaryFile(suffix=os.path.splitext(ext_name)[1] or ".gif", delete=False) as tf:
                 src_path = tf.name
-                f.save(src_path)
+                tf.write(file.file.read())
             try:
                 in_w, in_h = _probe_animated_frame_size(src_path)
-                frame_w = int(request.form.get("frame_w") or (in_w or 64))
-                frame_h = int(request.form.get("frame_h") or (in_h or 64))
+                frame_w_int = int(frame_w or (in_w or 64))
+                frame_h_int = int(frame_h or (in_h or 64))
 
-                # 如果是静态图上传到精灵表目标，按网格切片而不是整图覆盖
+                # Static image uploaded to spritesheet target — slice by grid
                 if not (ext_name.endswith(".gif") or ext_name.endswith(".webp")) and Image is not None:
                     try:
                         with Image.open(src_path) as sim:
                             sim = sim.convert("RGBA")
                             sw, sh = sim.size
-                            if frame_w <= 0 or frame_h <= 0:
-                                frame_w, frame_h = sw, sh
-                            cols = max(1, sw // frame_w)
-                            rows = max(1, sh // frame_h)
-                            sheet_w = cols * frame_w
-                            sheet_h = rows * frame_h
+                            if frame_w_int <= 0 or frame_h_int <= 0:
+                                frame_w_int, frame_h_int = sw, sh
+                            grid_cols = max(1, sw // frame_w_int)
+                            grid_rows = max(1, sh // frame_h_int)
+                            sheet_w = grid_cols * frame_w_int
+                            sheet_h = grid_rows * frame_h_int
                             if sheet_w <= 0 or sheet_h <= 0:
                                 raise RuntimeError("静态图尺寸与帧规格不匹配")
 
                             cropped = sim.crop((0, 0, sheet_w, sheet_h))
-                            # 目标是 webp 仍按无损保存，避免像素损失
                             if target.suffix.lower() == ".webp":
                                 cropped.save(str(target), "WEBP", lossless=True, quality=100, method=6)
                             else:
                                 cropped.save(str(target), "PNG")
 
                             st = target.stat()
-                            return jsonify({
+                            return {
                                 "ok": True,
                                 "path": rel_path,
                                 "size": st.st_size,
-                                "backup": backup,
+                                "backup": do_backup,
                                 "converted": {
                                     "from": ext_name.split(".")[-1] if "." in ext_name else "image",
                                     "to": "webp_spritesheet" if target.suffix.lower() == ".webp" else "png_spritesheet",
-                                    "frame_w": frame_w,
-                                    "frame_h": frame_h,
-                                    "columns": cols,
-                                    "rows": rows,
-                                    "frames": cols * rows,
+                                    "frame_w": frame_w_int,
+                                    "frame_h": frame_h_int,
+                                    "columns": grid_cols,
+                                    "rows": grid_rows,
+                                    "frames": grid_cols * grid_rows,
                                     "preserve_original": False,
                                     "pixel_art": True,
-                                }
-                            })
+                                },
+                            }
                     finally:
                         pass
 
-                # 默认：优先保留输入帧尺寸；若前端传了强制值则按前端。
-                preserve_original_val = request.form.get("preserve_original")
-                if preserve_original_val is None:
-                    preserve_original = True
-                else:
-                    preserve_original = preserve_original_val.strip() == "1"
-
-                pixel_art = (request.form.get("pixel_art") or "1").strip() == "1"
-                req_cols = int(request.form.get("cols") or 0)
-                req_rows = int(request.form.get("rows") or 0)
-                sheet_path, cols, rows, frames, out_fw, out_fh = _animated_to_spritesheet(
+                preserve_original_bool = preserve_original.strip() == "1"
+                pixel_art_bool = pixel_art.strip() == "1"
+                req_cols = int(cols or 0)
+                req_rows = int(rows or 0)
+                sheet_path, out_cols, out_rows, frames, out_fw, out_fh = _animated_to_spritesheet(
                     src_path,
-                    frame_w,
-                    frame_h,
+                    frame_w_int,
+                    frame_h_int,
                     out_ext=target.suffix.lower(),
-                    preserve_original=preserve_original,
-                    pixel_art=pixel_art,
+                    preserve_original=preserve_original_bool,
+                    pixel_art=pixel_art_bool,
                     cols=(req_cols if req_cols > 0 else None),
                     rows=(req_rows if req_rows > 0 else None),
                 )
@@ -2242,37 +2191,233 @@ def assets_upload():
                 st = target.stat()
                 from_type = "gif" if ext_name.endswith(".gif") else "webp"
                 to_type = "webp_spritesheet" if target.suffix.lower() == ".webp" else "png_spritesheet"
-                return jsonify({
+                return {
                     "ok": True,
                     "path": rel_path,
                     "size": st.st_size,
-                    "backup": backup,
+                    "backup": do_backup,
                     "converted": {
                         "from": from_type,
                         "to": to_type,
                         "frame_w": out_fw,
                         "frame_h": out_fh,
-                        "columns": cols,
-                        "rows": rows,
+                        "columns": out_cols,
+                        "rows": out_rows,
                         "frames": frames,
-                        "preserve_original": preserve_original,
-                        "pixel_art": pixel_art,
-                    }
-                })
+                        "preserve_original": preserve_original_bool,
+                        "pixel_art": pixel_art_bool,
+                    },
+                }
             finally:
                 try:
                     os.remove(src_path)
                 except Exception:
                     pass
 
-        f.save(str(target))
+        # Simple upload — just save the file
+        with open(str(target), "wb") as dst:
+            file.file.seek(0)
+            shutil.copyfileobj(file.file, dst)
+
         st = target.stat()
-        return jsonify({"ok": True, "path": rel_path, "size": st.st_size, "backup": backup})
+        return {"ok": True, "path": rel_path, "size": st.st_size, "backup": do_backup}
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
+
+
+# ═══════════════════════════════════════════════════════════
+#  Static file serving (must be last)
+# ═══════════════════════════════════════════════════════════
+# Vite build outputs: dist/assets/ (JS/CSS), dist/static/ (images/sprites)
+# Source files at frontend/ root (legacy).
+# URL prefix /static/ → look under dist/static/ first, then dist/, then frontend/
+
+def _find_static_file(url_prefix: str, path: str) -> Optional[str]:
+    """Try to find a static file. `url_prefix` is the URL segment (e.g. 'static' or 'assets')."""
+    # Try with the URL prefix under each root first (matches dist/ structure)
+    prefixed = f"{url_prefix}/{path}"
+    for root in _STATIC_ROOTS:
+        full_path = os.path.join(root, prefixed)
+        if os.path.isfile(full_path):
+            return full_path
+    # Then try bare path under each root (matches flat source layout)
+    for root in _STATIC_ROOTS:
+        full_path = os.path.join(root, path)
+        if os.path.isfile(full_path):
+            return full_path
+    return None
+
+
+@app.get("/static/{path:path}")
+def static_files(path: str):
+    """Serve static image/spritesheet assets."""
+    full_path = _find_static_file("static", path)
+    if full_path is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(full_path)
+
+
+@app.get("/assets/{path:path}")
+def assets_files(path: str):
+    """Serve Vite-bundled JS/CSS assets."""
+    full_path = _find_static_file("assets", path)
+    if full_path is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(full_path)
+
+
+# ═══════════════════════════════════════════════════════════
+#  Main entry point
+# ═══════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════
+#  Cross-Project API v2 — YiAi / YiVad integration
+# ═══════════════════════════════════════════════════════════
+
+@app.get("/api/v2/yi-ai/roles")
+def api_v2_yi_ai_roles():
+    """Proxy YiAi roles from the collector's in-memory cache (60s TTL).
+
+    Output format aligned with data-integration-spec §7.1:
+      id, title, botId, botName, icon, status, updatedAt,
+      knowledgeFileCount, redLinesCount, quickRefsCount
+    """
+    try:
+        roles = _get_cached_roles()
+        result = []
+        for role_id, r in roles.items():
+            entry = {
+                "id": role_id,
+                "title": r.get("title", ""),
+                "botId": r.get("botId", ""),
+                "botName": r.get("botName", ""),
+                "icon": r.get("icon", ""),
+                "domain": r.get("domain", ""),
+                "status": r.get("status", "active"),
+                "updatedAt": r.get("updatedAt", ""),
+                "knowledgeFileCount": r.get("knowledgeFileCount", 0),
+                "redLinesCount": r.get("redLinesCount", 0),
+                "quickRefsCount": r.get("quickRefsCount", 0),
+            }
+            result.append(entry)
+        return {
+            "roles": result,
+            "count": len(result),
+            "botIdCount": sum(1 for r in result if r.get("botId")),
+            "source": "collector-cache (YiAi GET /roles, 60s TTL)",
+            "updated_at": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        logger.warning("Failed to read YiAi roles from collector cache: %s", e)
+        return {
+            "roles": [],
+            "count": 0,
+            "botIdCount": 0,
+            "source": "collector-cache (unavailable)",
+            "error": str(e),
+            "updated_at": datetime.now().isoformat(),
+        }
+
+
+@app.get("/api/v2/bot-states")
+def api_v2_bot_states():
+    """Unified DSH bot states — single source for YiVad/YiAi consumption (R1).
+
+    Sources (priority order):
+      1. collector _latest_states      ← DSH live states (watchdog, <1s lag)
+      2. collector _get_cached_roles   ← YiAi role metadata (60s TTL)
+      3. floor-registry.json           ← floor allocation map
+      4. agents-state.json             ← agentId lookup (legacy, for IDs)
+    """
+    now_iso = datetime.now().isoformat()
+    try:
+        # ── Get live DSH states from collector ──
+        live_states = _get_latest_states()
+        roles = _get_cached_roles()
+
+        # ── Floor registry ──
+        floor_map: dict = {}
+        floor_file = os.path.join(ROOT_DIR, "floor-registry.json")
+        if os.path.exists(floor_file):
+            try:
+                with open(floor_file, "r") as f:
+                    floor_data = json.load(f)
+                for fname, fbots in floor_data.items():
+                    if fname.startswith("_meta"):
+                        continue
+                    for b in fbots:
+                        floor_map[b] = fname
+            except Exception:
+                pass
+
+        # ── Agent ID lookup from legacy agents-state.json ──
+        agent_id_map: dict = {}
+        try:
+            for a in _load_agents_state():
+                n = a.get("name", "")
+                aid = a.get("agentId", "")
+                if n and aid:
+                    agent_id_map[n] = aid
+        except Exception:
+            pass
+
+        # ── Merge: collector states + roles + floor + agentId ──
+        bots: dict = {}
+
+        # Build botName → botId reverse index from roles cache (keyed by id, not name)
+        _bot_name_to_id: dict = {}
+        for _r in roles.values():
+            bn = _r.get("botName", "").strip()
+            bd = _r.get("botId", "").strip()
+            if bn and bd:
+                _bot_name_to_id[bn] = bd
+
+        for name, sdata in live_states.items():
+            if name == "Chief":
+                continue  # Chief handled separately
+
+            state = sdata.get("state", "idle")
+            detail = sdata.get("detail", "")
+
+            # Inject YiAi role metadata
+            role = roles.get(name, {})
+            role_title = sdata.get("role_title", "") or role.get("title", "")
+            icon = sdata.get("icon", "") or role.get("icon", "")
+            bot_id = role.get("botId", "") or sdata.get("botId", "") or _bot_name_to_id.get(name, "")
+
+            # Floor: collector data first → floor-registry → hash fallback
+            floor = sdata.get("floor", "") or floor_map.get(name, "")
+            if not floor:
+                h = abs(hash(name))
+                floor = f"{(h % 3) + 1}F"
+
+            bots[name] = {
+                "agentId": agent_id_map.get(name, ""),
+                "botId": bot_id,
+                "name": name,
+                "state": state,
+                "detail": detail,
+                "floor": floor,
+                "roleTitle": role_title,
+                "icon": icon,
+                "updatedAt": sdata.get("updated_at", now_iso),
+            }
+
+        return {
+            "bots": bots,
+            "count": len(bots),
+            "source": "collector (DSH watchdog + YiAi roles)",
+            "rolesCached": len(roles),
+            "yiAiAvailable": len(roles) > 0,
+            "updated_at": now_iso,
+        }
+    except Exception as e:
+        logger.exception("api_v2_bot_states failed")
+        return JSONResponse(status_code=500, content={"ok": False, "msg": str(e)})
 
 
 if __name__ == "__main__":
+    import uvicorn
+
     raw_port = os.environ.get("STAR_BACKEND_PORT", "19000")
     try:
         backend_port = int(raw_port)
@@ -2281,23 +2426,19 @@ if __name__ == "__main__":
     if backend_port <= 0:
         backend_port = 19000
 
+    mode = "production" if is_production_mode() else "development"
     print("=" * 50)
-    print("Star Office UI - Backend State Service")
+    print("Star Office UI - Backend State Service (FastAPI + Redis)")
     print("=" * 50)
     print(f"State file: {STATE_FILE}")
     print(f"Listening on: http://0.0.0.0:{backend_port}")
-    if backend_port != 19000:
-        print(f"(Port override: set STAR_BACKEND_PORT to change; current: {raw_port})")
-    else:
-        print("(Set STAR_BACKEND_PORT to use a different port, e.g. 3009)")
-    mode = "production" if is_production_mode() else "development"
     print(f"Mode: {mode}")
     if is_production_mode():
         print("Security hardening: ENABLED (strict checks)")
     else:
         weak_flags = []
-        if not is_strong_secret(str(app.secret_key)):
-            weak_flags.append("weak FLASK_SECRET_KEY/STAR_OFFICE_SECRET")
+        if not is_strong_secret(str(SECRET_KEY)):
+            weak_flags.append("weak STAR_OFFICE_SECRET/FLASK_SECRET_KEY")
         if not is_strong_drawer_pass(ASSET_DRAWER_PASS_DEFAULT):
             weak_flags.append("weak ASSET_DRAWER_PASS")
         if weak_flags:
@@ -2306,5 +2447,4 @@ if __name__ == "__main__":
             print("Security hardening: OK")
     print("=" * 50)
 
-    app.run(host="0.0.0.0", port=backend_port, debug=False)
-
+    uvicorn.run(app, host="0.0.0.0", port=backend_port, log_level="info")

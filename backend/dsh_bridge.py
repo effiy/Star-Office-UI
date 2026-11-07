@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-DSH Bot → Pixel Office state bridge — main orchestration loop.
+⚠️ DEPRECATED — Use backend/dsh_server.py instead.
 
-Reads DSH bot state from ~/.dsh/bot/state.json and inflight.json,
-maps to pixel office agent IDs, and pushes states every 3 seconds.
+This standalone polling loop has been superseded by the FastAPI-based
+dsh_server.py microservice (:19003), which provides the same polling
+logic plus HTTP API endpoints (/health, /ds-bot-states).
 
-Architecture (UB-mode Stage 1 — 瘦身):
-    bridge.py          ← main loop (this file)
-    state_reader.py    ← DSH state file parsing
-    state_pusher.py    ← Pixel Office HTTP client
-    agent_mapper.py    ← bot name → agentId cache
-
-Usage:
+Migration path:
     python backend/dsh_bridge.py
+    →
+    python -m uvicorn backend.dsh_server:app --host 127.0.0.1 --port 19003
+
+The shared modules (state_reader, state_pusher, agent_mapper) remain
+in use by dsh_server.py.
+
+DSH Bot → Pixel Office state bridge — main orchestration loop.
 """
 import logging
 import signal

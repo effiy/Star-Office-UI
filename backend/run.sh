@@ -10,4 +10,4 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
   set +a
 fi
 
-exec "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/backend/app.py"
+exec "$ROOT_DIR/.venv/bin/python" -m uvicorn backend.app:app --host 0.0.0.0 --port "${STAR_BACKEND_PORT:-19000}" --log-level info
