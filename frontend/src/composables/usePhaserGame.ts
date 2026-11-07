@@ -1,52 +1,112 @@
-import { onBeforeUnmount, type Ref } from "vue";
-
 /**
- * Bridge to the existing Phaser game (game.js / layout.js).
- * Mounts the Phaser canvas inside the provided container element.
- * Ensures Phaser rendering and Vue UI layer don't conflict.
+ * usePhaserGame — Pinia ↔ Phaser Bridge (SU-03)
+ *
+ * Replaces the old game.js polling approach with reactive data flow:
+ *   Pinia store (bots, currentFloor) → Phaser scene (AgentPool, culling)
+ *
+ * Usage (in App.vue):
+ *   const { bridgeReady, setupBridge, getStats } = usePhaserGame();
+ *   <PhaserCanvas ref="phaserRef" @ready="setupBridge" />
  */
-export function usePhaserGame(container: Ref<HTMLElement | undefined>) {
-  let game: Phaser.Game | null = null;
-  let resizeObserver: ResizeObserver | null = null;
 
-  async function boot() {
-    if (!container.value) return;
+import { ref, watch, nextTick, type ShallowRef } from "vue";
+import { useBotStore, type FloorId } from "../stores/useBotStore";
+import type { SceneManagerAPI } from "../game/OfficeScene";
 
-    // Dynamically load layout.js and game.js if not already loaded
-    const scripts = document.querySelectorAll(
-      'script[src$="layout.js"], script[src$="game.js"]'
+export interface PhaserStats {
+  activeAgents: number;
+  poolSize: number;
+  fps: number;
+}
+
+export function usePhaserGame() {
+  const botStore = useBotStore();
+
+  // ── State ──
+  const bridgeReady = ref(false);
+  const stats = ref<PhaserStats>({ activeAgents: 0, poolSize: 0, fps: 0 });
+
+  let manager: SceneManagerAPI | null = null;
+  let syncTimer: ReturnType<typeof setTimeout> | null = null;
+  let statsTimer: ReturnType<typeof setInterval> | null = null;
+
+  // ── Debounced sync: batches rapid store changes ──
+  function scheduleSync() {
+    if (syncTimer) clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => {
+      if (manager) {
+        manager.syncAgents(botStore.bots);
+      }
+    }, 16); // ~60fps debounce — batches within a single frame
+  }
+
+  // ── Setup bridge (called from parent on @ready) ──
+  function setupBridge(mgr: SceneManagerAPI) {
+    manager = mgr;
+    bridgeReady.value = true;
+
+    // Initial sync
+    manager.syncAgents(botStore.bots);
+
+    // Watch bot state changes → update Phaser sprites
+    watch(
+      () => botStore.bots,
+      () => {
+        scheduleSync();
+      },
+      { deep: true }
     );
 
-    if (scripts.length < 2) {
-      await loadScript("/static/layout.js");
-      await loadScript("/static/game.js");
+    // Watch floor changes → cull agents on other floors
+    watch(
+      () => botStore.currentFloor,
+      (floor: FloorId) => {
+        manager?.setFloor(floor);
+        nextTick(() => {
+          manager?.syncAgents(botStore.bots);
+        });
+      }
+    );
+
+    // Periodic stats polling
+    statsTimer = setInterval(() => {
+      if (manager) {
+        stats.value = manager.getStats();
+      }
+    }, 2000);
+  }
+
+  // ── Teardown ———─
+  function teardown() {
+    if (syncTimer) clearTimeout(syncTimer);
+    if (statsTimer) clearInterval(statsTimer);
+    manager = null;
+    bridgeReady.value = false;
+  }
+
+  // ── Public API ──
+  function getManager(): SceneManagerAPI | null {
+    return manager;
+  }
+
+  function forceSync() {
+    if (manager) {
+      manager.syncAgents(botStore.bots);
     }
-
-    // The game.js auto-creates the Phaser instance into #game-container
-    // Vue just provides the container element
-    resizeObserver = new ResizeObserver(() => {
-      game?.scale?.resize(container.value!.clientWidth, container.value!.clientHeight);
-    });
-    resizeObserver.observe(container.value);
   }
 
-  function loadScript(src: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const s = document.createElement("script");
-      s.src = src;
-      s.onload = () => resolve();
-      s.onerror = () => reject(new Error(`Failed to load ${src}`));
-      document.head.appendChild(s);
-    });
-  }
-
-  boot();
-
-  onBeforeUnmount(() => {
-    resizeObserver?.disconnect();
-    game?.destroy(true);
-    game = null;
-  });
-
-  return { game };
+  return {
+    /** Whether the Pinia↔Phaser bridge is active */
+    bridgeReady,
+    /** Real-time stats: active agents, pool size, FPS */
+    stats,
+    /** Call from PhaserCanvas @ready event to establish the bridge */
+    setupBridge,
+    /** Tear down the bridge (called on unmount or error) */
+    teardown,
+    /** Get the raw SceneManagerAPI */
+    getManager,
+    /** Force immediate agent re-sync (for debugging) */
+    forceSync,
+  };
 }

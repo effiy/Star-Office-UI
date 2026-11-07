@@ -7,7 +7,14 @@
     @retry="retryBoot"
   >
     <OfficeLayout>
-      <div id="game-container" ref="gameContainer" />
+      <PhaserCanvas
+        ref="phaserRef"
+        :width="1280"
+        :height="720"
+        :auto-resize="true"
+        @ready="onPhaserReady"
+        @error="onPhaserError"
+      />
       <StatusPanel />
       <OfficeFloor
         :floors="botStore.floors"
@@ -17,32 +24,57 @@
       />
     </OfficeLayout>
   </ErrorBoundary>
+  <SoToast />
 </template>
 
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref } from "vue";
 import { useBotStore } from "./stores/useBotStore";
 import { usePhaserGame } from "./composables/usePhaserGame";
+import { useDSHBridge } from "./composables/useDSHBridge";
 import ErrorBoundary from "./components/ErrorBoundary.vue";
 import OfficeLayout from "./components/OfficeLayout.vue";
 import OfficeFloor from "./components/OfficeFloor.vue";
 import StatusPanel from "./components/StatusPanel.vue";
+import PhaserCanvas from "./components/PhaserCanvas.vue";
+import SoToast from "./components/ui/SoToast.vue";
+import { useToast } from "./composables/useToast";
+import type { SceneManagerAPI } from "./game/OfficeScene";
 
 const botStore = useBotStore();
-const gameContainer = ref<HTMLElement>();
+const { bridgeReady, setupBridge, teardown, stats } = usePhaserGame();
+const phaserRef = ref<InstanceType<typeof PhaserCanvas>>();
+const bridge = useDSHBridge();
+const toast = useToast();
 
-async function boot() {
-  await botStore.fetchBots();
-  botStore.connectWebSocket();
-  if (gameContainer.value) {
-    usePhaserGame(gameContainer);
+// ── Phaser event handlers ──
+
+function onPhaserReady(manager: SceneManagerAPI) {
+  setupBridge(manager);
+  // Expose stats globally for SU-04 verification
+  if (typeof window !== "undefined") {
+    (window as any).__soPhaserStats = () => ({ ...stats.value });
   }
 }
 
-function retryBoot() {
-  boot();
+function onPhaserError(err: Error) {
+  console.error("[App] Phaser initialization error:", err.message);
+  toast.error("Phaser 引擎启动失败：" + err.message, 6000);
 }
 
-onMounted(() => { boot(); });
-onBeforeUnmount(() => { botStore.disconnectWebSocket(); });
+function retryBoot() {
+  teardown();
+  bridge.stop();
+  bridge.start();
+}
+
+onMounted(() => {
+  // Unified DSH bridge: loads floor registry → REST + DSH → WebSocket
+  bridge.start();
+});
+
+onBeforeUnmount(() => {
+  teardown();
+  bridge.stop();
+});
 </script>

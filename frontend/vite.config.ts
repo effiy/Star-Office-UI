@@ -21,7 +21,7 @@ export default defineConfig({
     proxy: {
       "/agents": "http://127.0.0.1:19000",
       "/state": "http://127.0.0.1:19001",
-      "/ds-bot-states": "http://127.0.0.1:19001",
+      "/api/v2": "http://127.0.0.1:19000",
       "/static": "http://127.0.0.1:5173",
     },
   },
