@@ -45,9 +45,10 @@
 
 ## 冻结门数据（10:3x TL 第五轮取证——修正版）
 - **(a) roles count>0**：✅ **CLOSED** — count=328
-- **(b) 缺陷 B**：🟢 **实质修复，待铁甲正式复测关账** — `/api/v2/bot-states` 实测 **total=271（=live DSH 全量）/ non_idle=15 / roleTitle 232/271（86%，未绑定 bot 空角色=§7 合法态）/ mac·企鹅 executing 活数据**。铁甲验收项「total≥300」需**重基线为「= live DSH 源计数」**（271 是他本人晨测的 live 数，≥300 永远不达标）
+- **(b) 缺陷 B**：🟢 **数字三项全绿，待铁甲复测关账** — 10:36 终检：total=271（=live 源）/ non_idle=13 / **roleTitle 271/271（100%）**。铁甲「total≥300」重基线为「=live 源计数」
+  - ⚠️ **复测核查点（TL 新增）**：100% 角色覆盖超出 §7 botId 绑定预期（晨间 43/316）——铁甲验证 join 语义：是 roles-sync 绑定已增长（合法），还是 collector 引入 name 兜底（=§7 偏离，角色卡错配风险）。若为后者：冻结公告必须钉死 join 语义，回退纯 botId join 或把 name 兜底显式合法化并加错配测试
   - ⚠️ 上轮 TL 报 with_role=0 为**探测假阴性**（snake_case 探针 vs camelCase API），特此修正入档
-  - ⚠️ 新异常：**with_floor=5/271** — collector 的 floor-registry 名称匹配疑似失效（办公室视图不受影响：ws_server 自有 get_floor+hash 兜底；但 API floor 字段应在冻结报告前诊断）→ 铸舰
+  - ⚠️ with_floor=5/271 — R7 已裁决（registry 腐化，闪电再生成脚本，③ 验证前落地）→ 铸舰代码侧零修改
 - **(c) 7 态枚举**：✅ **CLOSED**
 - **D4 门**：✅ **CLEAR**（136 pass 零 xfail）
 - **R6 大小写裁决（TL）**：**wire 契约 = camelCase**（`roleTitle/agentId/updatedAt`——运行中 API 与前端临时字段已一致）；spec §3 BotState v1 的 snake_case 样例出**勘误**（闪电，spec 属主）；Pydantic 侧用 serialization alias 对齐 wire；冻结公告钉死 camelCase；星验契约测试补 wire-shape 断言
