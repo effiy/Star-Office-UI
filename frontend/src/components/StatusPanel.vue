@@ -10,6 +10,7 @@
         :key="bot.id"
         :bot="bot"
         :selected="bot.id === botStore.selectedBotId"
+        :stale="botStore.staleBotIds.has(bot.id)"
         @click="botStore.selectBot(bot.id)"
       />
     </div>
