@@ -36,15 +36,20 @@
 |----|--------|------|
 | 哲思 | a769e2b + 08e1341 + 本看板更新 | 裁决/取证 100%，第二波门禁未开 |
 | 铁甲 | a5cb94d/2c641cd/14ed973/5d698f6（spec v1.3）+ YiAi 747e1ec | T1+鉴权细则+三缺陷诊断 100% |
-| 闪电 | a953e3b（ws_server 重写+测试三件套） | SU-01 100%，⑤ 骨架在途（R3 结论前不接 SUBSCRIBE） |
-| 铸舰 | **待补——backend 文件仍未 commit**（collector/merge_engine/yi_ai_client/app.py/dsh_models/store_redis/tests） | ② 90%：token 生效+roles 解析修复（count=328）✅；**缺陷 B 未修**（门禁数据见下） |
-| 筑桥 | 76f21c4（SU-03 前端+端点迁移） | P1/P3/③ 100%，P4 codegen+useRoleStore 在途 |
-| 星绘 | 86c187c + f9ce7f4（T6+docs） | **100% 收口**，useBotStore 单写权已交棒筑桥 |
-| 星验 | 待补（103 用例/契约测试） | 基线 100%，7 态修正+D4 宣告在途 |
+| 闪电 | a953e3b（ws_server 重写+测试三件套） | SU-01 100%；ws_server 三层骨架（传输抽象 file/collector/redis + L2 过滤 + 富化）**collector 模式已启动验证中** |
+| 铸舰 | **待补——backend 文件仍未 commit** | ② 95%：token✅ roles=328✅ R4 app.py 自加载 .env✅ B1 TcpFakeServer 可行✅；**缺陷 B 修复中**（bot-states 切 collector 实时数据） |
+| 筑桥 | 76f21c4 + **P4 三件套待补 commit** | P1/P3/③/P4 100%：BotState.ts(185 行临时契约层) + useRoleStore(60s TTL+3 连败熔断) + gen-types.ts(冻结后一键重生成)，TS 零错误 build 533ms/55 modules，未碰 useBotStore（R5 合规） |
+| 星绘 | 86c187c + f9ce7f4（T6+docs） | **100% 收口**，单写权已交棒；下一检查点=RoleTooltip 实数据联调（(b) 修复后 role_title 出现） |
+| 星验 | **待补——契约测试+merge_engine tests commit** | **100%**：136 用例 / D4 门 ✅ CLEAR 正式宣告 / 7 态修正落地；下一件=SLO 延迟测试（铸舰 Collector 稳定后）+ ws_server 回归（闪电⑤后） |
 | 签蟹 | 批次 B 已推送 e46631f..76f21c4（7 commit 上线） | 基线锚定进行中 |
 
-## 冻结门数据（10:2x TL 实测，铸舰对表用）
-- **(a) roles count>0**：✅ **CLOSED** — `/api/v2/yi-ai/roles` count=328（name→id 解析修复生效）
-- **(b) 缺陷 B**：🔴 **OPEN** — `/api/v2/bot-states` 实测 `total=16 / 全 idle / with_role_title=0`；铁甲验收=total≥300、非idle>0、现行 bot 名出现。根因指向：collector 仍吃旧 bridge-state 注册表（16 席），未切 live DSH state.json/inflight.json（271 bots/24 inflight）；role_title=0 说明 botId join 未命中旧条目——切 live 源后绑定 bot（43+）应出角色字段
-- **(c) 7 态枚举**：🕐 星验在途（DshBotState+offline、merge_engine 降权、契约测试）
-- 冻结公告（b）（c）落地后由铸舰发，**必须带 R2 两层数字**：L1 镜像 total≥300 / L2 办公室 50 席
+## 冻结门数据（10:3x TL 第四轮取证）
+- **(a) roles count>0**：✅ **CLOSED** — count=328（token+解析双修复，铁甲 A1 复测中）
+- **(b) 缺陷 B**：🔴 **OPEN·修复中** — 铸舰正把 `/api/v2/bot-states` 切 collector 实时数据；上次实测 total=16/全idle/role=0，铁甲按验收标准（total≥300 含 botId、非idle>0、401 日志消失）复测后即关
+- **(c) 7 态枚举**：✅ **CLOSED** — DshBotState 6→7（offline 显式派生）、merge_engine offline 降 3 级（星验交付，136 用例佐证）
+- **D4 门**：✅ **CLEAR** — 星验正式宣告：136 pass / 零 xfail / 零 FAIL（23 unit + 6 integration + 5 resilience + 85 contract + 16 D4 gate + 1 slow skip，~29s）
+- 冻结公告：仅差 (b)。落地后铸舰发公告带 R2 两层数字（L1 镜像 ≥300 / L2 办公室 50 席），筑桥随即跑 `npx tsx scripts/gen-types.ts` 重新生成 BotState.ts 覆盖临时契约层（diff 归零才算闭环）
+
+## R3 Redis 基建进展
+- **B1 确认可行**：铸舰实测 TcpFakeServer 基础读写 OK；PUBSUB 有阻塞待解
+- **⑤ 拆两步**（TL 裁决）：闪电先以 **collector 模式**（已启动 ✅）完成广播瘦身 + stale 推送 + L2 50 席过滤——SLO 价值立即兑现；Redis SUBSCRIBE 作为传输层增强，待 PUBSUB 阻塞解决或真 Redis 落地后**一个开关切换**（传输抽象已就位），不作为第一波收口阻塞
