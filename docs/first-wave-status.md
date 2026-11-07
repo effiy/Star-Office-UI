@@ -43,12 +43,15 @@
 | 星验 | **待补——契约测试+merge_engine tests commit** | **100%**：136 用例 / D4 门 ✅ CLEAR 正式宣告 / 7 态修正落地；下一件=SLO 延迟测试（铸舰 Collector 稳定后）+ ws_server 回归（闪电⑤后） |
 | 签蟹 | 批次 B 已推送 e46631f..76f21c4（7 commit 上线） | 基线锚定进行中 |
 
-## 冻结门数据（10:3x TL 第四轮取证）
-- **(a) roles count>0**：✅ **CLOSED** — count=328（token+解析双修复，铁甲 A1 复测中）
-- **(b) 缺陷 B**：🔴 **OPEN·修复中** — 铸舰正把 `/api/v2/bot-states` 切 collector 实时数据；上次实测 total=16/全idle/role=0，铁甲按验收标准（total≥300 含 botId、非idle>0、401 日志消失）复测后即关
-- **(c) 7 态枚举**：✅ **CLOSED** — DshBotState 6→7（offline 显式派生）、merge_engine offline 降 3 级（星验交付，136 用例佐证）
-- **D4 门**：✅ **CLEAR** — 星验正式宣告：136 pass / 零 xfail / 零 FAIL（23 unit + 6 integration + 5 resilience + 85 contract + 16 D4 gate + 1 slow skip，~29s）
-- 冻结公告：仅差 (b)。落地后铸舰发公告带 R2 两层数字（L1 镜像 ≥300 / L2 办公室 50 席），筑桥随即跑 `npx tsx scripts/gen-types.ts` 重新生成 BotState.ts 覆盖临时契约层（diff 归零才算闭环）
+## 冻结门数据（10:3x TL 第五轮取证——修正版）
+- **(a) roles count>0**：✅ **CLOSED** — count=328
+- **(b) 缺陷 B**：🟢 **实质修复，待铁甲正式复测关账** — `/api/v2/bot-states` 实测 **total=271（=live DSH 全量）/ non_idle=15 / roleTitle 232/271（86%，未绑定 bot 空角色=§7 合法态）/ mac·企鹅 executing 活数据**。铁甲验收项「total≥300」需**重基线为「= live DSH 源计数」**（271 是他本人晨测的 live 数，≥300 永远不达标）
+  - ⚠️ 上轮 TL 报 with_role=0 为**探测假阴性**（snake_case 探针 vs camelCase API），特此修正入档
+  - ⚠️ 新异常：**with_floor=5/271** — collector 的 floor-registry 名称匹配疑似失效（办公室视图不受影响：ws_server 自有 get_floor+hash 兜底；但 API floor 字段应在冻结报告前诊断）→ 铸舰
+- **(c) 7 态枚举**：✅ **CLOSED**
+- **D4 门**：✅ **CLEAR**（136 pass 零 xfail）
+- **R6 大小写裁决（TL）**：**wire 契约 = camelCase**（`roleTitle/agentId/updatedAt`——运行中 API 与前端临时字段已一致）；spec §3 BotState v1 的 snake_case 样例出**勘误**（闪电，spec 属主）；Pydantic 侧用 serialization alias 对齐 wire；冻结公告钉死 camelCase；星验契约测试补 wire-shape 断言（防内部模型/外部 wire 两套拼写）
+- 冻结公告条件已齐：铸舰 commit backend + floor 诊断一句话 + 铁甲 (b) 复测关账 → 铸舰发公告（带 R2 两层数字 + R6 camelCase）→ 筑桥 codegen 重生成（diff 归零核查点）→ ③ 实数据验证 → ④ 退役 → ⑤ 两步走
 
 ## R3 Redis 基建进展
 - **B1 确认可行**：铸舰实测 TcpFakeServer 基础读写 OK；PUBSUB 有阻塞待解
