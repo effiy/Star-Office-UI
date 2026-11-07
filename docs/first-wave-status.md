@@ -50,7 +50,8 @@
   - ⚠️ 新异常：**with_floor=5/271** — collector 的 floor-registry 名称匹配疑似失效（办公室视图不受影响：ws_server 自有 get_floor+hash 兜底；但 API floor 字段应在冻结报告前诊断）→ 铸舰
 - **(c) 7 态枚举**：✅ **CLOSED**
 - **D4 门**：✅ **CLEAR**（136 pass 零 xfail）
-- **R6 大小写裁决（TL）**：**wire 契约 = camelCase**（`roleTitle/agentId/updatedAt`——运行中 API 与前端临时字段已一致）；spec §3 BotState v1 的 snake_case 样例出**勘误**（闪电，spec 属主）；Pydantic 侧用 serialization alias 对齐 wire；冻结公告钉死 camelCase；星验契约测试补 wire-shape 断言（防内部模型/外部 wire 两套拼写）
+- **R6 大小写裁决（TL）**：**wire 契约 = camelCase**（`roleTitle/agentId/updatedAt`——运行中 API 与前端临时字段已一致）；spec §3 BotState v1 的 snake_case 样例出**勘误**（闪电，spec 属主）；Pydantic 侧用 serialization alias 对齐 wire；冻结公告钉死 camelCase；星验契约测试补 wire-shape 断言
+- **R7 floor-registry 腐化裁决（TL，根因已实锤）**：registry 50 席与 live DSH 271 名**重合仅 5**（=with_floor=5，严格互证）——45 席名字死于团队改名潮（Chief/AI工程师/Git管家/OKR管家→Git管家·签蟹/AI专家·铁甲…）。**collector 代码无罪**，纯数据腐化，且团队名册持续演化会复发。裁决：闪电（SU-04 属主）写 **`scripts/gen_floor_registry.py` 再生成脚本**（可持续，不手改一次性数据）：live DSH 名单 + 角色模式分楼（管理/管家/专家→1F 15 席；工程/SU·/YiVad·/工兵→2F 20 席；创意/设计/大师→3F 15 席）→ 产出候选 50 席 commit，铁甲+哲思抽查。**③ 实数据验证前落地**（否则办公室视图验证无意义）；期间 hash 兜底保稳定，无宕机风险。冻结报告附 registry 刷新 SOP 一段（第二波 YiVad 集成同样受名册漂移影响，此为前置教训）
 - 冻结公告条件已齐：铸舰 commit backend + floor 诊断一句话 + 铁甲 (b) 复测关账 → 铸舰发公告（带 R2 两层数字 + R6 camelCase）→ 筑桥 codegen 重生成（diff 归零核查点）→ ③ 实数据验证 → ④ 退役 → ⑤ 两步走
 
 ## R3 Redis 基建进展
