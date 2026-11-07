@@ -7,7 +7,7 @@
 | ① ws_server 修复 | 闪电 | ✅ 闭环（星验 103 用例全绿佐证，D4 门待星验回执一句话正式宣告） |
 | ② Collector 双跑 | 铸舰 | 🟡 DSH 侧 LIVE；**缺陷 A**（roles 空：yi_ai_client 缺 X-Token + 走错 POST /roles-sync）修复中；**缺陷 B**（吃旧注册表，铁甲验收 total≥300/非idle>0/现行名出现）待修 |
 | ③ 前端重指向 | 筑桥 | 🟡 **代码完成**（/api/v2/bot-states 迁移 + proxy→:19000 + TS 零错误），验证等 ② 数据修复 |
-| ④ 退役 :19001/:19003 | 铸舰 | ⏸ 等 ③ 验证全绿 + D4 门（双跑期活着是合法状态，非「声明与实态冲突」） |
+| ④ 退役 :19001/:19003 | 铸舰 | ⏸ 等 ③ 验证全绿 + 冻结公告。**TL 预检已清（10:35）**：YiVad 桥接文件 `/Users/yi/YrY/.ds-bot-states.json` 的写入方在**仓外**（agent 侧脚本，每分钟活跃更新，仓内 grep 零命中）——退役 :19001/:19003 **不触碰 YiVad 数据源**，无需跨界变更单；pyenv vs .venv 漂移实锤（sync_bridge 跑 pyenv 3.13.3，dsh_server 跑 .venv）——两者本就在退役集内，漂移随 ④ 自然消亡，**规范启动 env = .venv** 写进冻结报告即可 |
 | ⑤ ws_server SUBSCRIBE | 闪电 | 🔴 **被基建阻塞**：本机无真 Redis，fakeredis 进程内内存跨不了进程 → 见裁决 R3 |
 
 ## TL 五项裁决（10:16）
