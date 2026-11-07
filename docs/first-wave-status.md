@@ -34,11 +34,17 @@
 ## 12:00 回执簿（企鹅动员令：commit hash + 进度%）
 | 人 | commit | 进度 |
 |----|--------|------|
-| 哲思 | a769e2b + 本看板更新 | 裁决/取证 100%，第二波门禁未开 |
+| 哲思 | a769e2b + 08e1341 + 本看板更新 | 裁决/取证 100%，第二波门禁未开 |
 | 铁甲 | a5cb94d/2c641cd/14ed973/5d698f6（spec v1.3）+ YiAi 747e1ec | T1+鉴权细则+三缺陷诊断 100% |
-| 闪电 | 待补（ws_server 修复+恢复 :19002） | SU-01 100%，⑤ 被 R3 阻塞 |
-| 铸舰 | 待补（collector/merge_engine/yi_ai_client/app.py v2 端点） | ② 80%（缺陷 A/B 修复中） |
-| 筑桥 | 待补（useDSHBridge/useBotStore/App.vue/vite.config/③迁移） | P1/P3/③代码 100%，P4 开工 |
-| 星绘 | 待补（tokens 73/SoToast/SoTooltip/stale 灰显） | P0 100%，T6 60% |
-| 星验 | 待补（103 用例/契约测试/merge_engine 测试） | 基线 100%，7 态修正中 |
-| 签蟹 | 待补（两仓基线锚定） | 进行中 |
+| 闪电 | a953e3b（ws_server 重写+测试三件套） | SU-01 100%，⑤ 骨架在途（R3 结论前不接 SUBSCRIBE） |
+| 铸舰 | **待补——backend 文件仍未 commit**（collector/merge_engine/yi_ai_client/app.py/dsh_models/store_redis/tests） | ② 90%：token 生效+roles 解析修复（count=328）✅；**缺陷 B 未修**（门禁数据见下） |
+| 筑桥 | 76f21c4（SU-03 前端+端点迁移） | P1/P3/③ 100%，P4 codegen+useRoleStore 在途 |
+| 星绘 | 86c187c + f9ce7f4（T6+docs） | **100% 收口**，useBotStore 单写权已交棒筑桥 |
+| 星验 | 待补（103 用例/契约测试） | 基线 100%，7 态修正+D4 宣告在途 |
+| 签蟹 | 批次 B 已推送 e46631f..76f21c4（7 commit 上线） | 基线锚定进行中 |
+
+## 冻结门数据（10:2x TL 实测，铸舰对表用）
+- **(a) roles count>0**：✅ **CLOSED** — `/api/v2/yi-ai/roles` count=328（name→id 解析修复生效）
+- **(b) 缺陷 B**：🔴 **OPEN** — `/api/v2/bot-states` 实测 `total=16 / 全 idle / with_role_title=0`；铁甲验收=total≥300、非idle>0、现行 bot 名出现。根因指向：collector 仍吃旧 bridge-state 注册表（16 席），未切 live DSH state.json/inflight.json（271 bots/24 inflight）；role_title=0 说明 botId join 未命中旧条目——切 live 源后绑定 bot（43+）应出角色字段
+- **(c) 7 态枚举**：🕐 星验在途（DshBotState+offline、merge_engine 降权、契约测试）
+- 冻结公告（b）（c）落地后由铸舰发，**必须带 R2 两层数字**：L1 镜像 total≥300 / L2 办公室 50 席
