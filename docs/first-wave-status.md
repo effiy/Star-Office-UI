@@ -48,7 +48,7 @@
 - **(b) 缺陷 B**：🟢 **数字三项全绿，待铁甲复测关账** — 10:36 终检：total=271（=live 源）/ non_idle=13 / **roleTitle 271/271（100%）**。铁甲「total≥300」重基线为「=live 源计数」
   - ⚠️ **复测核查点（TL 新增）**：100% 角色覆盖超出 §7 botId 绑定预期（晨间 43/316）——铁甲验证 join 语义：是 roles-sync 绑定已增长（合法），还是 collector 引入 name 兜底（=§7 偏离，角色卡错配风险）。若为后者：冻结公告必须钉死 join 语义，回退纯 botId join 或把 name 兜底显式合法化并加错配测试
   - ⚠️ 上轮 TL 报 with_role=0 为**探测假阴性**（snake_case 探针 vs camelCase API），特此修正入档
-  - ⚠️ with_floor=5/271 — R7 已裁决（registry 腐化，闪电再生成脚本，③ 验证前落地）→ 铸舰代码侧零修改
+  - ✅ **floor 异常定性（10:4x）**：with_floor 5→271 — collector `_compute_floor` 本就是 hash 兜底（与 ws_server/useBotStore 同算法），早期快照 floor 键缺失是 enrichment 未统一，现已全量。**R7 不变**：registry 未再生成（11-04 旧文件，45/50 死名），策展 50 席仍归闪电脚本；注意 `frontend/dist/floor-registry.json`（10:22 构建副本）也是旧数据，R7 落地后需重新 build
 - **(c) 7 态枚举**：✅ **CLOSED**
 - **D4 门**：✅ **CLEAR**（136 pass 零 xfail）
 - **R6 大小写裁决（TL）**：**wire 契约 = camelCase**（`roleTitle/agentId/updatedAt`——运行中 API 与前端临时字段已一致）；spec §3 BotState v1 的 snake_case 样例出**勘误**（闪电，spec 属主）；Pydantic 侧用 serialization alias 对齐 wire；冻结公告钉死 camelCase；星验契约测试补 wire-shape 断言
